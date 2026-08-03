@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reach Default Campaign Email</title>
+    <style>
+        /* Reset styles for email client compatibility */
+        body {
+            margin: 0;
+            padding: 0;
+            width: 100% !important;
+            -webkit-text-size-adjust: 100%;
+            -ms-text-size-adjust: 100%;
+            background-color: #f4f6f8;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        }
+        table {
+            border-spacing: 0;
+            border-collapse: collapse;
+            width: 100%;
+        }
+        td {
+            padding: 0;
+        }
+        img {
+            border: 0;
+            line-height: 100%;
+            outline: none;
+            text-decoration: none;
+        }
+
+        /* Campaign Customization Variables (Edit colors here) */
+        .bg-primary { background-color: #1a73e8 !important; }
+        .text-primary { color: #1a73e8 !important; }
+
+        /* Mobile responsive adjustments */
+        @media screen and (max-width: 600px) {
+            .email-container {
+                width: 100% !important;
+                padding: 10px !important;
+            }
+            .fluid-img {
+                width: 100% !important;
+                max-width: 100% !important;
+                height: auto !important;
+            }
+            .button {
+                display: block !important;
+                text-align: center !important;
+                padding-right: 0 !important;
+                padding-left: 0 !important;
+            }
+        }
+    </style>
+</head>
+<body style="background-color: #f4f6f8; margin: 0; padding: 0;">
+
+    <!-- Outer background wrapper -->
+    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f4f6f8; padding: 20px 0;">
+        <tr>
+            <td align="center">
+
+                <!-- Main Email Container Box (Max 600px for best delivery layout) -->
+                <table class="email-container" width="600" border="0" cellspacing="0" cellpadding="0" style="background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+
+                    <!-- 1. HEADER BLOCK -->
+                    <tr>
+                        <td class="bg-primary" bgcolor="#1a73e8" style="padding: 32px 40px; text-align: left;">
+                            <img src="{{CompanyLogoUrl}}" alt="{{CompanyName}}" height="32" style="display:block; margin-bottom: 18px;">
+
+                            <h1 style="margin: 0; color: #ffffff; font-size: 26px; font-weight: 700; line-height: 1.2;">
+                                {{CampaignHeadline}}
+                            </h1>
+                        </td>
+                    </tr>
+
+                    <!-- 2. BODY CONTENT BLOCK -->
+                    <tr>
+                        <td style="padding: 40px; background-color: #ffffff;">
+
+                            <p style="margin-top: 0; margin-bottom: 20px; font-size: 16px; line-height: 1.6; color: #333333;">
+                                Hi <strong>{{Name}}</strong>,
+                            </p>
+
+                            <p style="margin-bottom: 24px; font-size: 16px; line-height: 1.6; color: #333333;">
+                                {{OpeningLine}}
+                            </p>
+
+                            <!-- BLOCK:bullets:start -->
+                            <p style="margin-bottom: 12px; font-size: 16px; font-weight: 600; color: #333333;">
+                                Here is what you need to know about <strong>{{CampaignName}}</strong>:
+                            </p>
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 24px;">
+                                <tr>
+                                    <td width="24" valign="top" style="font-size: 16px; line-height: 1.6; color: #1a73e8;" class="text-primary">&#8226;</td>
+                                    <td style="font-size: 16px; line-height: 1.6; color: #555555; padding-bottom: 8px;">
+                                        <strong>{{BulletLabel1}}:</strong> {{BulletText1}}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td width="24" valign="top" style="font-size: 16px; line-height: 1.6; color: #1a73e8;" class="text-primary">&#8226;</td>
+                                    <td style="font-size: 16px; line-height: 1.6; color: #555555; padding-bottom: 8px;">
+                                        <strong>{{BulletLabel2}}:</strong> {{BulletText2}}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td width="24" valign="top" style="font-size: 16px; line-height: 1.6; color: #1a73e8;" class="text-primary">&#8226;</td>
+                                    <td style="font-size: 16px; line-height: 1.6; color: #555555;">
+                                        <strong>{{BulletLabel3}}:</strong> {{BulletText3}}
+                                    </td>
+                                </tr>
+                            </table>
+                            <!-- BLOCK:bullets:end -->
+
+                            <!-- BLOCK:callout:start -->
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f8f9fa; border-left: 4px solid #1a73e8; margin-bottom: 32px;" class="border-primary">
+                                <tr>
+                                    <td style="padding: 16px 20px;">
+                                        <p style="margin: 0; font-size: 14px; line-height: 1.5; color: #555555; font-style: italic;">
+                                            <strong>&#128161; {{CalloutLabel}}:</strong> {{CalloutText}}
+                                        </p>
+                                    </td>
+                                </tr>
+                            </table>
+                            <!-- BLOCK:callout:end -->
+
+                            <!-- BLOCK:cta:start -->
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 32px;">
+                                <tr>
+                                    <td align="center">
+                                        <table border="0" cellspacing="0" cellpadding="0">
+                                            <tr>
+                                                <td class="bg-primary" bgcolor="#1a73e8" style="border-radius: 4px;">
+                                                    <a href="{{ActionUrl}}" target="_blank" class="button" style="font-size: 16px; font-weight: 600; color: #ffffff; text-decoration: none; padding: 14px 32px; display: inline-block; border-radius: 4px;">
+                                                        {{ActionLabel}}
+                                                    </a>
+                                                </td>
+                                            </tr>
+                                        </table>
+                                    </td>
+                                </tr>
+                            </table>
+                            <!-- BLOCK:cta:end -->
+
+                        </td>
+                    </tr>
+
+                    <!-- 4. SIGNATURE & CAMPAIGN FOOTER BANNER -->
+                    <tr>
+                        <td style="padding: 0 40px 40px 40px; background-color: #ffffff; border-top: 1px solid #eeeeee;">
+                            <p style="margin-top: 24px; margin-bottom: 16px; font-size: 15px; color: #666666;">
+                                Best regards,
+                            </p>
+                            <p style="margin: 0; font-size: 15px; line-height: 1.4; color: #333333; font-weight: 600;">
+                                {{SenderName}}
+                            </p>
+                            <p style="margin: 0; font-size: 14px; line-height: 1.4; color: #666666;">
+                                {{SenderDesignation}} | <strong>{{CompanyName}}</strong>
+                            </p>
+                            <p style="margin: 4px 0 0 0; font-size: 13px; line-height: 1.4; color: #999999;">
+                                {{SenderPhone}} &nbsp;|&nbsp; <a href="{{CompanyWebsite}}" style="color:#999999;">{{CompanyWebsite}}</a>
+                            </p>
+
+                            <!-- BLOCK:badges:start -->
+                            <table border="0" cellspacing="0" cellpadding="0" style="margin-top: 16px;">
+                                <tr>
+                                    <td style="padding-right: 10px;"><img src="{{Badge1Url}}" alt="Certification" height="40"></td>
+                                    <td style="padding-right: 10px;"><img src="{{Badge2Url}}" alt="Certification" height="40"></td>
+                                    <td><img src="{{Badge3Url}}" alt="Certification" height="40"></td>
+                                </tr>
+                            </table>
+                            <!-- BLOCK:badges:end -->
+
+                            <!-- BLOCK:secondary:start -->
+                            <p style="margin-top: 24px; margin-bottom: 0; font-size: 14px;">
+                                &#128073; <a href="{{SecondaryActionUrl}}" class="text-primary" style="color: #1a73e8; font-weight: 600; text-decoration: underline;">{{SecondaryActionLabel}}</a>
+                            </p>
+                            <!-- BLOCK:secondary:end -->
+                        </td>
+                    </tr>
+
+                </table><!-- /Main Email Container Box -->
+
+                <!-- Compliance Footer (Unsubscribe / Address) -->
+                <table class="email-container" width="600" border="0" cellspacing="0" cellpadding="0" style="margin-top: 20px;">
+                    <tr>
+                        <td style="padding: 0 40px; text-align: center;">
+                            <p style="margin: 0; font-size: 12px; line-height: 1.6; color: #999999;">
+                                {{CompanyName}} &nbsp;&bull;&nbsp; {{CompanyAddress}}
+                            </p>
+                            <p style="margin: 4px 0 0 0; font-size: 12px; line-height: 1.6; color: #999999;">
+                                This email was sent to {{Email}}. <a href="{{UnsubscribeUrl}}" style="color: #999999; text-decoration: underline;">Unsubscribe</a>
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+
+            </td>
+        </tr>
+    </table>
+
+</body>
+</html>

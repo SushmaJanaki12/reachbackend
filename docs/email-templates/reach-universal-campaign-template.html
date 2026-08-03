@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Reach Universal Campaign Template</title>
+</head>
+<body style="margin:0; padding:0; background:#eef1f5; font-family: Arial, Helvetica, sans-serif;">
+
+<!--
+  UNIVERSAL CAMPAIGN EMAIL TEMPLATE
+  =================================
+  This shell works for ANY campaign type (event reminders, job alerts,
+  announcements, promotions, plain updates). Structure:
+
+  1. Logo header            — always shown
+  2. Headline                — always shown, campaign-specific text
+  3. Greeting + body         — always shown, free-form message
+  4. DETAILS TABLE (optional)  — delete this whole block if not needed
+  5. CTA BUTTON (optional)     — delete this whole block if not needed
+  6. Signature block         — always shown, same for every campaign
+  7. Footer                  — always shown
+
+  The details table (#4) is the only "structured" part, and it's just a
+  generic key/value list — {{DetailLabel1}}/{{DetailValue1}} etc. — so it
+  can hold Date/Time/Location for a checkup, or Company/Role/Type for a
+  job alert, or Amount/Due Date for a billing notice, or be removed
+  entirely for a plain-text announcement. Add or remove rows freely;
+  there's no fixed schema.
+-->
+
+<table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#eef1f5; padding:32px 0;">
+<tr>
+<td align="center">
+
+<table cellpadding="0" cellspacing="0" border="0" width="600" style="background:#ffffff; border-radius:10px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,0.06);">
+
+  <!-- ===== 1. LOGO HEADER (always shown) ===== -->
+  <tr>
+    <td style="padding:28px 32px 20px 32px; text-align:center; border-bottom:1px solid #f0f0f0;">
+      <img src="{{CompanyLogoUrl}}" alt="{{CompanyName}}" height="34">
+    </td>
+  </tr>
+
+  <!-- ===== 2. HEADLINE (always shown) ===== -->
+  <tr>
+    <td style="padding:32px 32px 4px 32px; text-align:center;">
+      <span style="font-size:22px; font-weight:bold; color:#1a3d8f;">{{CampaignHeadline}}</span>
+    </td>
+  </tr>
+
+  <!-- ===== 3. GREETING + BODY (always shown, free-form) ===== -->
+  <tr>
+    <td style="padding:8px 32px 24px 32px; text-align:center; font-size:15px; color:#444444; line-height:1.6;">
+      Hi {{Name}},<br>
+      {{MessageBody}}
+    </td>
+  </tr>
+
+  <!-- =====================================================
+       4. DETAILS TABLE — OPTIONAL BLOCK
+       Delete this entire <tr>...</tr> if the campaign has
+       no structured details to show. Otherwise, add as many
+       DetailLabel/DetailValue rows as needed (2, 4, 6...).
+       ===================================================== -->
+  <tr>
+    <td style="padding:0 32px 28px 32px;">
+      <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f7f9fc; border-radius:8px; border:1px solid #e5e9f0;">
+        <tr>
+          <td style="padding:18px 20px; font-size:14px; color:#333333;">
+            <table cellpadding="0" cellspacing="0" border="0" width="100%">
+              <tr>
+                <td style="padding:6px 0; color:#8a94a6; width:40%;">{{DetailLabel1}}</td>
+                <td style="padding:6px 0; font-weight:bold; text-align:right;">{{DetailValue1}}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0; color:#8a94a6;">{{DetailLabel2}}</td>
+                <td style="padding:6px 0; font-weight:bold; text-align:right;">{{DetailValue2}}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0; color:#8a94a6;">{{DetailLabel3}}</td>
+                <td style="padding:6px 0; font-weight:bold; text-align:right;">{{DetailValue3}}</td>
+              </tr>
+              <!-- Add/remove rows as needed. For a status pill instead of
+                   plain text, use:
+              <tr>
+                <td style="padding:6px 0; color:#8a94a6;">{{DetailLabel4}}</td>
+                <td style="padding:6px 0; text-align:right;">
+                  <span style="background:#e6f4ea; color:#1e7e34; font-size:12px; font-weight:bold; padding:4px 10px; border-radius:12px;">&#9679; {{DetailValue4}}</span>
+                </td>
+              </tr>
+              -->
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- =====================================================
+       5. CTA BUTTON — OPTIONAL BLOCK
+       Delete this entire <tr>...</tr> if the campaign has
+       no action for the recipient to take.
+       ===================================================== -->
+  <tr>
+    <td style="padding:0 32px 32px 32px; text-align:center;">
+      <a href="{{ActionUrl}}" style="display:inline-block; background:#1a3d8f; color:#ffffff; text-decoration:none; font-size:14px; font-weight:bold; padding:12px 28px; border-radius:6px;">
+        {{ActionLabel}}
+      </a>
+    </td>
+  </tr>
+
+  <tr>
+    <td style="padding:0 32px;">
+      <hr style="border:none; border-top:1px solid #eeeeee; margin:0 0 28px 0;">
+    </td>
+  </tr>
+
+  <!-- ===== 6. SIGNATURE BLOCK (always shown, identical across all campaigns) ===== -->
+  <tr>
+    <td style="padding:0 32px 28px 32px;">
+      <table cellpadding="0" cellspacing="0" border="0">
+        <tr>
+          <td style="padding-bottom:2px;">
+            <span style="font-family: Georgia, 'Times New Roman', serif; font-size:20px; font-weight:bold; color:#1a3d8f;">{{SenderName}}</span>
+            <a href="{{SenderLinkedInUrl}}" style="text-decoration:none;">
+              <img src="https://cdn-icons-png.flaticon.com/24/174/174857.png" width="16" height="16" alt="LinkedIn" style="vertical-align:middle; margin-left:6px;">
+            </a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-bottom:4px; font-size:13px; font-weight:bold; color:#4fd1a5;">
+            {{SenderDesignation}}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-bottom:10px; font-size:12px; color:#1a3d8f;">
+            &#128222; {{SenderPhone}}
+            &nbsp;&nbsp;&#127760;
+            <a href="{{CompanyWebsite}}" style="color:#1a3d8f; text-decoration:underline;">{{CompanyWebsite}}</a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-bottom:8px;">
+            <table cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="vertical-align:middle; padding-right:10px;">
+                  <img src="{{CompanyLogoUrl}}" alt="{{CompanyName}}" height="42">
+                </td>
+                <td style="vertical-align:middle; padding-right:6px;">
+                  <img src="{{Badge1Url}}" alt="Certification 1" height="42">
+                </td>
+                <td style="vertical-align:middle; padding-right:6px;">
+                  <img src="{{Badge2Url}}" alt="Certification 2" height="42">
+                </td>
+                <td style="vertical-align:middle;">
+                  <img src="{{Badge3Url}}" alt="Certification 3" height="42">
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#1a3d8f; border-radius:4px;">
+              <tr>
+                <td style="padding:7px 12px; color:#ffffff; font-size:11px;">
+                  {{CompanyTagline}}
+                </td>
+                <td style="padding:7px 12px; color:#ffffff; font-size:11px; text-align:right;">
+                  &#128205; {{CompanyLocations}}
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- ===== 7. FOOTER (always shown) ===== -->
+  <tr>
+    <td style="background:#f7f9fc; padding:16px 32px; font-size:11px; color:#9aa4b2; text-align:center;">
+      Sent to {{Email}} by {{CompanyName}}.
+      <a href="{{UnsubscribeUrl}}" style="color:#9aa4b2;">Unsubscribe</a>
+    </td>
+  </tr>
+
+</table>
+
+</td>
+</tr>
+</table>
+
+</body>
+</html>

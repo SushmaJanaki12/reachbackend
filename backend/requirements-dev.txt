@@ -1,0 +1,9 @@
+# Test dependencies (not needed in production)
+-r requirements.txt
+pytest==9.1.1
+httpx==0.28.1
+
+# Local process supervisor -- see supervisord.conf (keeps the API + worker
+# running and auto-restarts either one if it crashes; the worker especially
+# must never be left down or campaign sends stall at "queued" indefinitely)
+supervisor==4.3.0
