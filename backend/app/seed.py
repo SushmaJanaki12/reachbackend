@@ -27,6 +27,7 @@ PERMISSIONS = [
     ("campaign.edit", "Campaigns", "Edit campaigns"),
     ("campaign.delete", "Campaigns", "Delete campaigns"),
     ("dataset.upload", "Datasets", "Upload datasets"),
+    ("dataset.override_warnings", "Datasets", "Force-import rows with unresolved validation warnings"),
     ("content.edit", "Content", "Edit content"),
     ("campaign.send", "Sending", "Send campaigns"),
     ("template.view", "Templates", "View message templates"),

@@ -1,16 +1,49 @@
-from tests.conftest import make_campaign, drain_queue
+from tests.conftest import make_campaign, drain_queue, _token
 
+# Clean fixture used by the shared `_upload()` helper -- tests that only care
+# about "a campaign with some recipients" (content, send, tracking, preview)
+# use this so they aren't coupled to dataset-validation behavior. Tests that
+# exercise validation itself use MESSY_CSV below.
 CSV = (
+    "Name,Email Address,Mobile Number,Company\n"
+    "Alice,alice@example.com,9876543210,Acme\n"
+    "Bob,bob@example.com,9123456789,Beta\n"
+    "Carol,carol@example.com,9988776655,Gamma\n"
+)
+
+MESSY_CSV = (
     "Name,Email Address,Mobile Number,Company\n"
     "Alice,alice@example.com,9876543210,Acme\n"
     "Bob,bad-email,9123456789,Beta\n"
     "Carol,carol@example.com,not-a-number,Gamma\n"
+    "Dave,alice@example.com,9000000000,Acme\n"
+    "Eve,eve@gmial.com,9111111111,Delta\n"
 )
 
 
-def _upload(client, headers, cid, csv=CSV):
-    return client.post(f"/api/campaigns/{cid}/dataset", headers=headers,
-                       files={"file": ("data.csv", csv, "text/csv")})
+def _validate(client, headers, cid, csv=CSV):
+    r = client.post(f"/api/campaigns/{cid}/dataset/validate", headers=headers,
+                     files={"file": ("data.csv", csv, "text/csv")})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _confirm_mapping(client, headers, cid, session):
+    r = client.post(f"/api/campaigns/{cid}/dataset/validate/{session['id']}/mapping", headers=headers,
+                     json={"column_mapping": session["column_mapping"]})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _upload(client, headers, cid, csv=CSV, mode="valid_only"):
+    """Runs the full validate -> confirm mapping -> import flow and returns
+    the /import response (same CampaignOut shape the old blind-upload
+    endpoint used to return), so tests that only care about the resulting
+    recipient list don't need to know about the staging flow."""
+    session = _validate(client, headers, cid, csv)
+    _confirm_mapping(client, headers, cid, session)
+    return client.post(f"/api/campaigns/{cid}/dataset/validate/{session['id']}/import", headers=headers,
+                        json={"mode": mode})
 
 
 def test_create_campaign(client, admin_headers, project):
@@ -28,12 +61,128 @@ def test_dataset_upload_and_columns(client, admin_headers, project):
     assert "Company" in body["columns"]
 
 
-def test_dataset_missing_mandatory_column(client, admin_headers, project):
+def test_dataset_missing_email_column_flags_every_row_and_blocks_import(client, admin_headers, project):
     c = make_campaign(client, admin_headers, project["id"])
     bad = "Name,Company\nAlice,Acme\n"
-    r = _upload(client, admin_headers, c["id"], bad)
-    assert r.status_code == 400
-    assert "Mobile" in r.json()["detail"] or "Email" in r.json()["detail"]
+    session = _validate(client, admin_headers, c["id"], bad)
+    assert session["summary"]["ready_for_import"] == 0
+    assert any(i["issue_type"] == "missing_email" for i in session["issues"])
+
+    _confirm_mapping(client, admin_headers, c["id"], session)
+    imp = client.post(f"/api/campaigns/{c['id']}/dataset/validate/{session['id']}/import",
+                       headers=admin_headers, json={"mode": "valid_only"})
+    assert imp.status_code == 400
+
+
+def test_header_variants_with_trailing_whitespace_are_mapped_not_flagged_missing(client, admin_headers, project):
+    """s.no / "name " / email / "phone number " (trailing spaces, no exact
+    "Phone", no First/Last split, s.no not a recognized field) should all
+    resolve via header normalization + the synonym table, not fall through
+    to a false missing-mandatory-column error."""
+    c = make_campaign(client, admin_headers, project["id"])
+    csv = "s.no,name ,email,phone number \n1,John Doe,john@example.com,9876543210\n"
+    session = _validate(client, admin_headers, c["id"], csv)
+
+    assert session["column_mapping"] == {
+        "s.no": None, "name": "name", "email": "email", "phone number": "mobile",
+    }
+    assert not any(i["issue_type"] == "missing_email" for i in session["issues"])
+    assert session["summary"]["ready_for_import"] == 1
+
+
+def test_import_requires_confirmed_mapping(client, admin_headers, project):
+    c = make_campaign(client, admin_headers, project["id"])
+    session = _validate(client, admin_headers, c["id"])
+    assert session["mapping_confirmed"] is False
+    imp = client.post(f"/api/campaigns/{c['id']}/dataset/validate/{session['id']}/import",
+                       headers=admin_headers, json={"mode": "valid_only"})
+    assert imp.status_code == 400
+
+
+def test_validation_flags_duplicates_invalid_email_and_typos(client, admin_headers, project):
+    c = make_campaign(client, admin_headers, project["id"])
+    session = _validate(client, admin_headers, c["id"], MESSY_CSV)
+    issue_types = {i["issue_type"] for i in session["issues"]}
+    assert "invalid_email" in issue_types    # Bob: "bad-email"
+    assert "duplicate_email" in issue_types  # Dave: duplicate of Alice's email
+    assert "possible_typo" in issue_types    # Eve: gmial.com
+    assert "invalid_phone" in issue_types    # Carol: "not-a-number"
+
+    typo_issue = next(i for i in session["issues"] if i["issue_type"] == "possible_typo")
+    assert typo_issue["suggested_fix"] == "eve@gmail.com"
+
+    # ready_for_import (valid_only): only Alice is fully clean.
+    # ready_for_import_with_overrides: Alice + Carol (phone warning) + Eve (typo warning);
+    # Bob (error) and Dave (duplicate) stay excluded either way.
+    assert session["summary"]["ready_for_import"] == 1
+    assert session["summary"]["ready_for_import_with_overrides"] == 3
+
+
+def test_apply_fix_corrects_typo_and_import_valid_only_then_includes_it(client, admin_headers, project):
+    c = make_campaign(client, admin_headers, project["id"])
+    session = _validate(client, admin_headers, c["id"], MESSY_CSV)
+    typo_issue = next(i for i in session["issues"] if i["issue_type"] == "possible_typo")
+
+    fixed = client.post(f"/api/campaigns/{c['id']}/dataset/validate/{session['id']}/fixes",
+                         headers=admin_headers, json={"fix_ids": [typo_issue["fix_id"]]})
+    assert fixed.status_code == 200
+    assert not any(i["issue_type"] == "possible_typo" for i in fixed.json()["issues"])
+    assert fixed.json()["summary"]["ready_for_import"] == 2  # Alice + now-fixed Eve
+
+    _confirm_mapping(client, admin_headers, c["id"], session)
+    imp = client.post(f"/api/campaigns/{c['id']}/dataset/validate/{session['id']}/import",
+                       headers=admin_headers, json={"mode": "valid_only"})
+    assert imp.status_code == 200
+    assert imp.json()["recipient_count"] == 2
+
+
+def test_ignore_warnings_requires_permission_and_logs_override(client, admin_headers, project):
+    uid = next(u["id"] for u in client.get("/api/users", headers=admin_headers).json()
+               if u["email"] == "user@reach.io")
+    scoped_project = client.post("/api/projects", headers=admin_headers, json={
+        "name": "Scoped for override test", "email": "scoped-override@acme.com", "member_ids": [uid],
+    }).json()
+    c = make_campaign(client, admin_headers, scoped_project["id"])
+
+    session = _validate(client, admin_headers, c["id"], MESSY_CSV)
+    _confirm_mapping(client, admin_headers, c["id"], session)
+
+    user_headers = {"Authorization": f"Bearer {_token(client, 'user@reach.io', 'User@123')}"}
+    denied = client.post(f"/api/campaigns/{c['id']}/dataset/validate/{session['id']}/import",
+                          headers=user_headers, json={"mode": "ignore_warnings"})
+    assert denied.status_code == 403
+
+    allowed = client.post(f"/api/campaigns/{c['id']}/dataset/validate/{session['id']}/import",
+                           headers=admin_headers, json={"mode": "ignore_warnings"})
+    assert allowed.status_code == 200
+    assert allowed.json()["recipient_count"] == 3  # Alice, Carol, Eve -- Bob/Dave still excluded
+
+
+def test_download_validation_report(client, admin_headers, project):
+    c = make_campaign(client, admin_headers, project["id"])
+    session = _validate(client, admin_headers, c["id"], MESSY_CSV)
+    r = client.get(f"/api/campaigns/{c['id']}/dataset/validate/{session['id']}/report", headers=admin_headers)
+    assert r.status_code == 200
+    assert "invalid_email" in r.text
+    assert "Row" in r.text
+
+
+def test_undo_import_batch_removes_only_that_batch(client, admin_headers, project):
+    c = make_campaign(client, admin_headers, project["id"])
+    imported = _upload(client, admin_headers, c["id"]).json()
+    assert imported["recipient_count"] == 3
+    batch_id = imported["last_import_batch_id"]
+    assert batch_id
+
+    client.post(f"/api/campaigns/{c['id']}/recipients", headers=admin_headers,
+                json={"name": "Manual", "email": "manual@example.com", "mobile": "9000000002"})
+    assert len(client.get(f"/api/campaigns/{c['id']}/recipients", headers=admin_headers).json()) == 4
+
+    undone = client.post(f"/api/campaigns/{c['id']}/dataset/batches/{batch_id}/undo", headers=admin_headers)
+    assert undone.status_code == 200
+
+    remaining = client.get(f"/api/campaigns/{c['id']}/recipients", headers=admin_headers).json()
+    assert [r["name"] for r in remaining] == ["Manual"]
 
 
 def test_add_and_remove_recipient(client, admin_headers, project):
@@ -131,6 +280,13 @@ def test_save_html_in_email_content_is_rejected(client, admin_headers, project):
 def test_send_simulated_and_summary(client, admin_headers, project):
     c = make_campaign(client, admin_headers, project["id"])
     _upload(client, admin_headers, c["id"])
+    # Manually add recipients with bad contact info -- decoupled from the bulk
+    # import validation flow (which would now block/exclude these), so this
+    # test can still exercise send-time per-message failure handling.
+    client.post(f"/api/campaigns/{c['id']}/recipients", headers=admin_headers,
+                json={"name": "BadEmail", "email": "not-an-email", "mobile": "9000000001"})
+    client.post(f"/api/campaigns/{c['id']}/recipients", headers=admin_headers,
+                json={"name": "BadMobile", "email": "badmobile@example.com", "mobile": "notanumber"})
     for ch in ("email", "whatsapp", "sms"):
         client.put(f"/api/campaigns/{c['id']}/content/{ch}", headers=admin_headers,
                    json={"subject": "Hi {{Name}}", "body": "Hello {{Name}}"})
@@ -144,11 +300,11 @@ def test_send_simulated_and_summary(client, admin_headers, project):
 
     s = client.get(f"/api/campaigns/{c['id']}/summary", headers=admin_headers).json()
     assert s["status"] == "completed"
-    # 3 recipients x 3 channels = 9 messages
-    assert s["total_messages"] == 9
-    # Bob invalid email + Carol invalid mobile (whatsapp & sms) = 3 failures
+    # 5 recipients x 3 channels = 15 messages
+    assert s["total_messages"] == 15
+    # BadEmail fails email (1); BadMobile fails whatsapp & sms (2) = 3 failures
     assert s["failed"] == 3
-    assert s["total_recipients"] == 3
+    assert s["total_recipients"] == 5
 
 
 def test_send_without_recipients_fails(client, admin_headers, project):
@@ -158,7 +314,7 @@ def test_send_without_recipients_fails(client, admin_headers, project):
     assert r.status_code == 400
 
 
-def test_send_completed_campaign_rejected(client, admin_headers, project):
+def test_send_while_sending_rejected_but_resend_after_completion_allowed(client, admin_headers, project):
     c = make_campaign(client, admin_headers, project["id"])
     _upload(client, admin_headers, c["id"])
     client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers, json={"body": "Hello {{Name}}"})
@@ -168,15 +324,23 @@ def test_send_completed_campaign_rejected(client, admin_headers, project):
     assert first.status_code == 200
     assert first.json()["status"] == "sending"
 
-    resend = client.post(f"/api/campaigns/{c['id']}/send", headers=admin_headers)
-    assert resend.status_code == 409
+    # A second send while the first is still in flight is rejected -- avoids
+    # two overlapping runs racing on the same Message rows.
+    concurrent_resend = client.post(f"/api/campaigns/{c['id']}/send", headers=admin_headers)
+    assert concurrent_resend.status_code == 409
 
     drain_queue()
     completed = client.get(f"/api/campaigns/{c['id']}", headers=admin_headers).json()
     assert completed["status"] == "completed"
 
+    # Once fully completed, sending again (e.g. a deliberate follow-up blast
+    # to the same dataset) is allowed -- no permanent "already sent" lock.
     resend_after_complete = client.post(f"/api/campaigns/{c['id']}/send", headers=admin_headers)
-    assert resend_after_complete.status_code == 409
+    assert resend_after_complete.status_code == 200
+    assert resend_after_complete.json()["status"] == "sending"
+    drain_queue()
+    resent = client.get(f"/api/campaigns/{c['id']}", headers=admin_headers).json()
+    assert resent["status"] == "completed"
 
 
 def test_preview_rejects_recipient_from_another_campaign(client, admin_headers, project):
@@ -195,6 +359,8 @@ def test_preview_rejects_recipient_from_another_campaign(client, admin_headers, 
 def test_tracking_and_export(client, admin_headers, project):
     c = make_campaign(client, admin_headers, project["id"])
     _upload(client, admin_headers, c["id"])
+    client.post(f"/api/campaigns/{c['id']}/recipients", headers=admin_headers,
+                json={"name": "BadEmail", "email": "not-an-email", "mobile": "9000000003"})
     client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers, json={"body": "Hello {{Name}}"})
     client.post(f"/api/campaigns/{c['id']}/send", headers=admin_headers)
     drain_queue()
@@ -202,8 +368,8 @@ def test_tracking_and_export(client, admin_headers, project):
     tr = client.get(f"/api/campaigns/{c['id']}/tracking/email", headers=admin_headers)
     assert tr.status_code == 200
     rows = tr.json()
-    assert len(rows) == 3
-    assert any(m["status"] == "failed" for m in rows)  # Bob
+    assert len(rows) == 4
+    assert any(m["status"] == "failed" for m in rows)  # BadEmail
 
     csv = client.get(f"/api/campaigns/{c['id']}/report.csv", headers=admin_headers)
     assert csv.status_code == 200

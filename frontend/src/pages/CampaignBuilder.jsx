@@ -4,8 +4,7 @@ import Layout from '../components/Layout'
 import { useAuth } from '../auth'
 import api, { apiError } from '../api'
 import { Icon, Field, StatusBadge, Toggle, Spinner, useToast } from '../components/ui'
-import { BLANK_TPL_FIELDS, TemplateFieldsForm } from '../components/TemplateFieldsForm'
-import TemplatePicker from '../components/TemplatePicker'
+import { ValidationPanel } from '../components/DatasetValidation'
 
 const CHANNELS = [
   { key: 'email', label: 'Email', icon: 'mail', enField: 'email_enabled', hasSubject: true },
@@ -13,13 +12,8 @@ const CHANNELS = [
   { key: 'sms', label: 'SMS', icon: 'phone', enField: 'sms_enabled', hasSubject: false },
 ]
 
-function isContentAuthored(channelKey, val) {
-  if (!val) return false
-  if (channelKey === 'email' && val.content_mode === 'template') {
-    const f = val.template_fields || {}
-    return !!(f.headline || f.opening_line)
-  }
-  return !!val.body
+function isContentAuthored(val) {
+  return !!(val && val.body)
 }
 
 export default function CampaignBuilder() {
@@ -45,9 +39,7 @@ export default function CampaignBuilder() {
     setRecipients(recs)
     setProject(proj)
     const map = {}
-    cont.forEach((x) => {
-      map[x.channel] = { subject: x.subject, body: x.body, content_mode: x.content_mode, template_fields: x.template_fields }
-    })
+    cont.forEach((x) => { map[x.channel] = { subject: x.subject, body: x.body } })
     setContents(map)
   }
   useEffect(() => { load() }, [id])
@@ -79,12 +71,13 @@ export default function CampaignBuilder() {
 
       {step === 'recipients' && (
         <RecipientsStep campaignId={id} recipients={recipients} setRecipients={setRecipients} columns={campaign.columns}
-          canEdit={can('dataset.upload')} onUploaded={(c) => { load(); toast.ok(`${c.recipient_count} recipients imported`) }}
+          canEdit={can('dataset.upload')} canOverrideWarnings={can('dataset.override_warnings')}
+          onUploaded={(c) => { load(); toast.ok(`${c.recipient_count} recipients imported`) }}
           onChange={load} toast={toast} onError={(m) => toast.err(m)} />
       )}
       {step === 'content' && (
         <ContentStep campaign={campaign} campaignId={id} columns={campaign.columns} contents={contents} setContents={setContents}
-          recipients={recipients} project={project} canEdit={can('content.edit')} toast={toast} onCampaignChange={load} />
+          recipients={recipients} canEdit={can('content.edit')} toast={toast} onCampaignChange={load} />
       )}
       {step === 'send' && (
         <SendStep campaign={campaign} project={project} contents={contents}
@@ -96,12 +89,26 @@ export default function CampaignBuilder() {
 
 /* ---------------- Recipients ---------------- */
 const BLANK_REC = { name: '', email: '', mobile: '' }
-function RecipientsStep({ campaignId, recipients, setRecipients, columns, canEdit, onUploaded, onChange, toast, onError }) {
+const SAMPLE_CSV = 'FirstName,LastName,Email,Phone,Company,JobTitle,City,State,Country\n'
+  + 'Jane,Doe,jane.doe@example.com,+14155551234,Acme Inc,Marketing Manager,San Francisco,CA,United States\n'
+  + 'John,Smith,john.smith@example.com,+442071234567,Beta Ltd,Sales Director,London,,United Kingdom\n'
+
+function downloadBlob(content, type, filename) {
+  const blob = new Blob([content], { type })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = filename
+  document.body.appendChild(a); a.click(); a.remove()
+  URL.revokeObjectURL(url)
+}
+
+function RecipientsStep({ campaignId, recipients, setRecipients, columns, canEdit, canOverrideWarnings, onUploaded, onChange, toast, onError }) {
   const fileRef = useRef()
   const [busy, setBusy] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
   const [rec, setRec] = useState(BLANK_REC)
   const [adding, setAdding] = useState(false)
+  const [validationSession, setValidationSession] = useState(null)
   const setF = (k, v) => setRec((s) => ({ ...s, [k]: v }))
   const extraCols = columns.filter((c) => !['name', 'email address', 'mobile number', 'email', 'mobile', 'phone'].includes(c.toLowerCase())).slice(0, 3)
 
@@ -111,8 +118,8 @@ function RecipientsStep({ campaignId, recipients, setRecipients, columns, canEdi
     const fd = new FormData()
     fd.append('file', file)
     try {
-      const { data } = await api.post(`/campaigns/${campaignId}/dataset`, fd, { headers: { 'Content-Type': 'multipart/form-data' } })
-      onUploaded(data)
+      const { data } = await api.post(`/campaigns/${campaignId}/dataset/validate`, fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+      setValidationSession(data)
     } catch (e) { onError(apiError(e)) } finally { setBusy(false); if (fileRef.current) fileRef.current.value = '' }
   }
 
@@ -144,24 +151,34 @@ function RecipientsStep({ campaignId, recipients, setRecipients, columns, canEdi
 
   return (
     <>
-      {canEdit && (
+      {validationSession && (
+        <ValidationPanel campaignId={campaignId} session={validationSession} setSession={setValidationSession}
+          canEdit={canEdit} canOverrideWarnings={canOverrideWarnings} toast={toast}
+          onImported={(c) => { setValidationSession(null); onUploaded(c) }}
+          onCancel={() => setValidationSession(null)} />
+      )}
+
+      {!validationSession && canEdit && (
         <div className="card card-pad" style={{ marginBottom: 20 }}>
           <div className="flex between wrap-gap">
             <div className="flex gap12">
               <span className="ico" style={{ width: 44, height: 44, borderRadius: 11, background: 'var(--teal-soft)', color: 'var(--teal)', display: 'grid', placeItems: 'center' }}><Icon.upload width={20} /></span>
               <div>
                 <div style={{ fontWeight: 700 }}>Upload recipient dataset</div>
-                <div className="t-sub">Excel (.xlsx) or CSV — must include <b>Name</b>, <b>Email Address</b> &amp; <b>Mobile Number</b>. Or add recipients one at a time. Choosing a new file replaces the existing recipients.</div>
+                <div className="t-sub">CSV, XLS or XLSX — only <b>Email</b> is required. AI-powered validation runs after upload: you'll review a quality score and issue report, confirm column mapping, and fix or exclude bad rows before anything is imported. Choosing a new file replaces the existing recipients.</div>
               </div>
             </div>
             <div className="flex gap8">
+              <button className="btn btn-ghost" onClick={() => downloadBlob(SAMPLE_CSV, 'text/csv', 'sample-contacts.csv')}>
+                <Icon.download width={15} /> Download Sample CSV
+              </button>
               <button className="btn btn-ghost" onClick={() => setShowAdd((s) => !s)}><Icon.userplus width={15} /> Add recipient</button>
               {recipients.length > 0 && (
                 <button className="btn btn-ghost" disabled={busy} onClick={removeDataset}><Icon.trash width={15} /> Remove dataset</button>
               )}
-              <input ref={fileRef} type="file" accept=".csv,.xlsx" style={{ display: 'none' }} onChange={(e) => upload(e.target.files[0])} />
+              <input ref={fileRef} type="file" accept=".csv,.xls,.xlsx" style={{ display: 'none' }} onChange={(e) => upload(e.target.files[0])} />
               <button className="btn btn-primary" disabled={busy} onClick={() => fileRef.current.click()}>
-                {busy ? 'Importing…' : <><Icon.upload width={15} /> Choose file</>}
+                {busy ? 'Validating…' : <><Icon.upload width={15} /> Choose file</>}
               </button>
             </div>
           </div>
@@ -185,7 +202,7 @@ function RecipientsStep({ campaignId, recipients, setRecipients, columns, canEdi
         </div>
       )}
 
-      {recipients.length === 0 ? (
+      {!validationSession && (recipients.length === 0 ? (
         <div className="card empty">
           <div className="ico"><Icon.users width={24} /></div>
           <h3 style={{ marginBottom: 6 }}>No recipients yet</h3>
@@ -220,64 +237,33 @@ function RecipientsStep({ campaignId, recipients, setRecipients, columns, canEdi
           </div>
           {recipients.length > 100 && <p className="t-sub mt8">Showing first 100 of {recipients.length}.</p>}
         </>
-      )}
+      ))}
     </>
   )
 }
 
 /* ---------------- Content ---------------- */
-function ContentStep({ campaign, campaignId, columns, contents, setContents, recipients, project, canEdit, toast, onCampaignChange }) {
+function ContentStep({ campaign, campaignId, columns, contents, setContents, recipients, canEdit, toast, onCampaignChange }) {
   const [active, setActive] = useState('email')
   const [preview, setPreview] = useState({ subject: '', body: '', missing: [] })
-  const [tplPreview, setTplPreview] = useState({ html: '', missing: [] })
   const [recipientId, setRecipientId] = useState(recipients[0]?.id || null)
   const [saving, setSaving] = useState(false)
+  const [aiMode, setAiMode] = useState(false)
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [generating, setGenerating] = useState(false)
   const [templates, setTemplates] = useState([])
   const [tplRef, setTplRef] = useState(campaign.sms_template_ref || '')
   const [dlt, setDlt] = useState(null) // {valid, reason}
   const bodyRef = useRef(); const subjRef = useRef(); const focused = useRef('body')
-  const tplRefs = useRef({}); const tplFocused = useRef('opening_line')
 
   const ch = CHANNELS.find((c) => c.key === active)
-  const val = contents[active] || { subject: '', body: '', content_mode: 'plain', template_fields: BLANK_TPL_FIELDS }
+  const val = contents[active] || { subject: '', body: '' }
   const setVal = (patch) => setContents((s) => ({ ...s, [active]: { ...val, ...patch } }))
-  const isTemplateMode = active === 'email' && val.content_mode === 'template'
-  const tf = val.template_fields || BLANK_TPL_FIELDS
 
   useEffect(() => { api.get('/sms/templates').then((r) => setTemplates(r.data)).catch(() => {}) }, [])
   const selectedTpl = templates.find((t) => t.id === Number(tplRef))
 
-  const getTplValue = (path) => {
-    if (path.startsWith('bullets.')) {
-      const [, idx, key] = path.split('.')
-      return (tf.bullets && tf.bullets[Number(idx)] && tf.bullets[Number(idx)][key]) || ''
-    }
-    return tf[path] || ''
-  }
-  const setTplField = (path, v) => {
-    if (path.startsWith('bullets.')) {
-      const [, idx, key] = path.split('.')
-      const bullets = [...(tf.bullets && tf.bullets.length ? tf.bullets : BLANK_TPL_FIELDS.bullets)]
-      bullets[Number(idx)] = { ...bullets[Number(idx)], [key]: v }
-      setVal({ template_fields: { ...tf, bullets } })
-    } else {
-      setVal({ template_fields: { ...tf, [path]: v } })
-    }
-  }
-
   const insert = (token) => {
-    if (isTemplateMode) {
-      const path = tplFocused.current
-      const el = tplRefs.current[path]
-      const cur = getTplValue(path)
-      if (!el) { setTplField(path, cur + token); return }
-      const start = el.selectionStart ?? cur.length
-      const end = el.selectionEnd ?? cur.length
-      const next = cur.slice(0, start) + token + cur.slice(end)
-      setTplField(path, next)
-      setTimeout(() => { el.focus(); el.selectionStart = el.selectionEnd = start + token.length }, 0)
-      return
-    }
     const ref = focused.current === 'subject' && ch.hasSubject ? subjRef : bodyRef
     const el = ref.current
     if (!el) { setVal({ body: (val.body || '') + token }); return }
@@ -294,13 +280,21 @@ function ContentStep({ campaign, campaignId, columns, contents, setContents, rec
     setSaving(true)
     try {
       const payload = { subject: val.subject || '', body: val.body || '' }
-      if (active === 'email') {
-        payload.content_mode = val.content_mode || 'plain'
-        payload.template_fields = tf
-      }
       await api.put(`/campaigns/${campaignId}/content/${active}`, payload)
       toast.ok(`${ch.label} content saved`)
     } catch (e) { toast.err(apiError(e)) } finally { setSaving(false) }
+  }
+
+  useEffect(() => { setAiMode(false); setAiPrompt('') }, [active])
+
+  const generateContent = async () => {
+    if (!aiPrompt.trim()) return
+    setGenerating(true)
+    try {
+      const { data } = await api.post(`/campaigns/${campaignId}/content/${active}/generate`, { prompt: aiPrompt })
+      setVal({ subject: ch.hasSubject ? data.subject : val.subject, body: data.body })
+      toast.ok('Draft generated — review and edit before saving')
+    } catch (e) { toast.err(apiError(e)) } finally { setGenerating(false) }
   }
 
   const changeTemplate = async (ref) => {
@@ -313,21 +307,14 @@ function ContentStep({ campaign, campaignId, columns, contents, setContents, rec
 
   const runPreview = async () => {
     try {
-      if (isTemplateMode) {
-        const { data } = await api.post(`/campaigns/${campaignId}/preview-template`, {
-          fields: tf, recipient_id: recipientId,
-        })
-        setTplPreview(data)
-      } else {
-        const { data } = await api.post(`/campaigns/${campaignId}/preview`, {
-          channel: active, subject: val.subject || '', body: val.body || '', recipient_id: recipientId,
-        })
-        setPreview(data)
-      }
+      const { data } = await api.post(`/campaigns/${campaignId}/preview`, {
+        channel: active, subject: val.subject || '', body: val.body || '', recipient_id: recipientId,
+      })
+      setPreview(data)
     } catch (e) { toast.err(apiError(e)) }
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { runPreview() }, [active, recipientId, val.subject, val.body, val.content_mode, JSON.stringify(tf)])
+  useEffect(() => { runPreview() }, [active, recipientId, val.subject, val.body])
 
   // live DLT validation for SMS
   useEffect(() => {
@@ -350,17 +337,6 @@ function ContentStep({ campaign, campaignId, columns, contents, setContents, rec
           })}
         </div>
 
-        {(active === 'email' || active === 'whatsapp') && (
-          <div className="flex" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>
-            <TemplatePicker channel={active} campaignId={campaignId} canEdit={canEdit} toast={toast}
-              onApplied={() => api.get(`/campaigns/${campaignId}/content`).then((r) => {
-                const map = {}
-                r.data.forEach((x) => { map[x.channel] = { subject: x.subject, body: x.body, content_mode: x.content_mode, template_fields: x.template_fields } })
-                setContents(map)
-              })} />
-          </div>
-        )}
-
         {active === 'sms' && (
           <div className="field">
             <label>DLT template <span className="hint" style={{ fontWeight: 400 }}>(India — required for delivery)</span></label>
@@ -377,14 +353,26 @@ function ContentStep({ campaign, campaignId, columns, contents, setContents, rec
           </div>
         )}
 
-        {active === 'email' && (
-          <div className="field">
-            <label>Content mode</label>
-            <div className="tabs" style={{ marginBottom: 0 }}>
-              <div className={`tab ${(val.content_mode || 'plain') === 'plain' ? 'active' : ''}`}
-                onClick={() => canEdit && setVal({ content_mode: 'plain' })}>Plain text</div>
-              <div className={`tab ${val.content_mode === 'template' ? 'active' : ''}`}
-                onClick={() => canEdit && setVal({ content_mode: 'template', template_fields: tf })}>Use branded template</div>
+        <div className="field">
+          <label>Content mode</label>
+          <div className="tabs" style={{ marginBottom: 0 }}>
+            <div className={`tab ${!aiMode ? 'active' : ''}`} onClick={() => canEdit && setAiMode(false)}>Plain text</div>
+            <div className={`tab ${aiMode ? 'active' : ''}`} onClick={() => canEdit && setAiMode(true)}>
+              <span className="flex gap8"><Icon.sparkle width={14} /> Generative AI</span>
+            </div>
+          </div>
+        </div>
+
+        {aiMode && (
+          <div className="field" style={{ background: 'var(--teal-soft2)', border: '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
+            <label>Describe what you want</label>
+            <textarea className="textarea" style={{ minHeight: 70 }} value={aiPrompt} disabled={!canEdit || generating}
+              onChange={(e) => setAiPrompt(e.target.value)}
+              placeholder='e.g. "Announce our new product launch, friendly and exciting tone, mention a 20% early-bird discount"' />
+            <div className="flex" style={{ justifyContent: 'flex-end', marginTop: 8 }}>
+              <button className="btn btn-primary btn-sm" disabled={!canEdit || generating || !aiPrompt.trim()} onClick={generateContent}>
+                {generating ? 'Generating…' : <><Icon.sparkle width={14} /> Generate</>}
+              </button>
             </div>
           </div>
         )}
@@ -398,19 +386,14 @@ function ContentStep({ campaign, campaignId, columns, contents, setContents, rec
           </div>
         )}
 
-        {isTemplateMode ? (
-          <TemplateFieldsForm project={project} tf={tf} getTplValue={getTplValue} setTplField={setTplField}
-            tplRefs={tplRefs} tplFocused={tplFocused} canEdit={canEdit} />
-        ) : (
-          <div className="field">
-            <label>Message body</label>
-            <textarea ref={bodyRef} className="textarea" style={{ minHeight: 180 }}
-              value={val.body || ''} disabled={!canEdit}
-              onFocus={() => (focused.current = 'body')}
-              onChange={(e) => setVal({ body: e.target.value })}
-              placeholder={`Hello {{Name}},\n\nWrite your ${ch.label} message here…`} />
-          </div>
-        )}
+        <div className="field">
+          <label>Message body</label>
+          <textarea ref={bodyRef} className="textarea" style={{ minHeight: 180 }}
+            value={val.body || ''} disabled={!canEdit}
+            onFocus={() => (focused.current = 'body')}
+            onChange={(e) => setVal({ body: e.target.value })}
+            placeholder={`Hello {{Name}},\n\nWrite your ${ch.label} message here…`} />
+        </div>
 
         {active === 'email' && <AttachmentsPanel campaignId={campaignId} canEdit={canEdit} toast={toast} />}
 
@@ -449,32 +432,18 @@ function ContentStep({ campaign, campaignId, columns, contents, setContents, rec
           )}
         </div>
         <div style={{ padding: '0 22px 22px', flex: 1, minHeight: 0 }}>
-          {isTemplateMode ? (
-            <>
-              {tplPreview.missing && tplPreview.missing.length > 0 && (
-                <div className="hint" style={{ marginBottom: 10, color: 'var(--warn)' }}>
-                  ⚠ No value found for: {tplPreview.missing.map((m) => `{{${m}}}`).join(', ')} — sent as blank.
-                </div>
-              )}
-              <iframe title="Email preview" srcDoc={tplPreview.html || '<body></body>'} sandbox=""
-                style={{ width: '100%', height: 520, border: '1px solid var(--border)', borderRadius: 10, background: '#fff' }} />
-            </>
-          ) : (
-            <>
-              {preview.missing && preview.missing.length > 0 && (
-                <div className="hint" style={{ marginBottom: 10, color: 'var(--warn)' }}>
-                  ⚠ No value found for: {preview.missing.map((m) => `{{${m}}}`).join(', ')} — sent as blank.
-                </div>
-              )}
-              <div className="preview">
-                <div className="ph"><span>{ch.label} preview</span><span>{recipients.length ? '' : 'Upload recipients to personalize'}</span></div>
-                <div className="pb">
-                  {ch.hasSubject && preview.subject && <div className="subj">{preview.subject}</div>}
-                  {preview.body || <span className="muted">Nothing to preview yet.</span>}
-                </div>
-              </div>
-            </>
+          {preview.missing && preview.missing.length > 0 && (
+            <div className="hint" style={{ marginBottom: 10, color: 'var(--warn)' }}>
+              ⚠ No value found for: {preview.missing.map((m) => `{{${m}}}`).join(', ')} — sent as blank.
+            </div>
           )}
+          <div className="preview">
+            <div className="ph"><span>{ch.label} preview</span><span>{recipients.length ? '' : 'Upload recipients to personalize'}</span></div>
+            <div className="pb">
+              {ch.hasSubject && preview.subject && <div className="subj">{preview.subject}</div>}
+              {preview.body || <span className="muted">Nothing to preview yet.</span>}
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -572,8 +541,12 @@ function SendStep({ campaign, project, contents, canSend, onChange, toast, nav }
   }
 
   const activeChannels = CHANNELS.filter((c) => flags[c.enField] && avail[c.key])
-  const missingContent = activeChannels.filter((c) => !isContentAuthored(c.key, contents[c.key]))
-  const ready = campaign.recipient_count > 0 && activeChannels.length > 0 && missingContent.length === 0
+  const missingContent = activeChannels.filter((c) => !isContentAuthored(contents[c.key]))
+  // Only an in-flight send blocks starting another -- a "completed" campaign
+  // is deliberately re-sendable (e.g. a follow-up blast to the same dataset).
+  const sendingInProgress = campaign.status === 'sending'
+  const alreadySent = campaign.status === 'completed'
+  const ready = !sendingInProgress && campaign.recipient_count > 0 && activeChannels.length > 0 && missingContent.length === 0
 
   return (
     <div className="grid grid-2" style={{ alignItems: 'start' }}>
@@ -595,7 +568,7 @@ function SendStep({ campaign, project, contents, canSend, onChange, toast, nav }
                       ? <span className="badge green" title={channelStatus[c.key].provider}><span className="d" />Live</span>
                       : <span className="badge gray"><span className="d" />Simulated</span>)}
                   </div>
-                  <div className="t-sub">{available ? (isContentAuthored(c.key, contents[c.key]) ? (live ? `Sends via ${channelStatus[c.key].provider}` : 'Content ready · simulated') : 'No content authored') : 'Not enabled on project'}</div>
+                  <div className="t-sub">{available ? (isContentAuthored(contents[c.key]) ? (live ? `Sends via ${channelStatus[c.key].provider}` : 'Content ready · simulated') : 'No content authored') : 'Not enabled on project'}</div>
                 </div>
               </div>
               <Toggle checked={!!flags[c.enField] && available} onChange={(v) => toggle(c.enField, c.key, v)} />
@@ -621,14 +594,18 @@ function SendStep({ campaign, project, contents, canSend, onChange, toast, nav }
               <div style={{ fontWeight: 700 }}>{campaign.recipient_count * activeChannels.length} messages</div>
               <div className="t-sub">will be dispatched across {activeChannels.length} channel{activeChannels.length !== 1 ? 's' : ''}</div>
             </div>
-            {canSend && (
+            {canSend && !sendingInProgress && (
               <button className="btn btn-primary" disabled={!ready || busy} onClick={send}>
-                {busy ? 'Sending…' : <><Icon.send width={16} /> Send campaign</>}
+                {busy ? 'Sending…' : <><Icon.send width={16} /> {alreadySent ? 'Send again' : 'Send campaign'}</>}
               </button>
             )}
           </div>
-          {!ready && <p className="hint mt8">Complete the checklist above to enable sending.</p>}
-          {!canSend && <p className="hint mt8">You don't have permission to send campaigns.</p>}
+          {sendingInProgress && <p className="hint mt8">This campaign is currently sending — check back shortly.</p>}
+          {!sendingInProgress && alreadySent && (
+            <p className="hint mt8">Already sent once — sending again will re-dispatch to all current recipients.</p>
+          )}
+          {!sendingInProgress && !ready && <p className="hint mt8">Complete the checklist above to enable sending.</p>}
+          {!sendingInProgress && !canSend && <p className="hint mt8">You don't have permission to send campaigns.</p>}
         </div>
       </div>
     </div>

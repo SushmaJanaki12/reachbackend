@@ -18,7 +18,8 @@ os.environ["SECRET_KEY"] = "test-secret-key"
 os.environ["SEED_DEFAULT_ADMIN"] = "true"  # tests log in as admin@reach.io / Admin@123
 # Force simulated sending so tests never hit Office 365 / Metamorph.
 for _k in ["AZURE_TENANT_ID", "O365_CLIENT_ID", "O365_CLIENT_SECRET", "O365_FROM_EMAIL",
-           "SMS_USERNAME", "SMS_PASSWORD", "SMS_TEMPLATE_ID", "SMS_FROM", "SMS_API_URL", "SMS_SUCCESS_TOKEN"]:
+           "SMS_USERNAME", "SMS_PASSWORD", "SMS_TEMPLATE_ID", "SMS_FROM", "SMS_API_URL", "SMS_SUCCESS_TOKEN",
+           "OPENAI_API_KEY"]:
     os.environ[_k] = ""
 
 import pytest
@@ -77,6 +78,22 @@ def project(client, admin_headers):
     })
     assert r.status_code == 200, r.text
     return r.json()
+
+
+def upload_dataset(client, headers, campaign_id, csv):
+    """Runs the validate -> confirm mapping -> import flow (see
+    app/dataset_validation) and returns the /import response, for tests that
+    just need "a campaign with some recipients" and don't care about the
+    staging steps in between."""
+    v = client.post(f"/api/campaigns/{campaign_id}/dataset/validate", headers=headers,
+                     files={"file": ("data.csv", csv, "text/csv")})
+    assert v.status_code == 200, v.text
+    session = v.json()
+    m = client.post(f"/api/campaigns/{campaign_id}/dataset/validate/{session['id']}/mapping", headers=headers,
+                     json={"column_mapping": session["column_mapping"]})
+    assert m.status_code == 200, m.text
+    return client.post(f"/api/campaigns/{campaign_id}/dataset/validate/{session['id']}/import", headers=headers,
+                        json={"mode": "valid_only"})
 
 
 def make_campaign(client, headers, project_id, name="Camp"):

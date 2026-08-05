@@ -250,36 +250,9 @@ class CampaignUpdate(BaseModel):
     sms_template_ref: int | None = None
 
 
-class BulletIn(BaseModel):
-    label: str = ""
-    text: str = ""
-
-
-class TemplateFields(BaseModel):
-    """Structured content for the email.content_mode == 'template' path -- see
-    app/email_template.py. Never contains raw HTML, only plain field values."""
-    headline: str = ""
-    opening_line: str = ""
-    show_bullets: bool = False
-    campaign_name: str = ""
-    bullets: list[BulletIn] = []
-    show_callout: bool = False
-    callout_label: str = ""
-    callout_text: str = ""
-    show_cta: bool = False
-    action_url: str = ""
-    action_label: str = ""
-    show_badges: bool = False
-    show_secondary: bool = False
-    secondary_action_url: str = ""
-    secondary_action_label: str = ""
-
-
 class ContentIn(BaseModel):
     subject: str = ""
     body: str = ""
-    content_mode: str = "plain"  # "plain" | "template" (email channel only)
-    template_fields: TemplateFields = TemplateFields()
 
 
 class ContentOut(BaseModel):
@@ -287,18 +260,15 @@ class ContentOut(BaseModel):
     channel: str
     subject: str
     body: str
-    content_mode: str = "plain"
-    template_fields: TemplateFields = TemplateFields()
 
 
-class TemplatePreviewIn(BaseModel):
-    fields: TemplateFields
-    recipient_id: int | None = None
+class ContentGenerateIn(BaseModel):
+    prompt: str
 
 
-class TemplatePreviewOut(BaseModel):
-    html: str
-    missing: list[str] = []
+class ContentGenerateOut(BaseModel):
+    subject: str = ""
+    body: str = ""
 
 
 class RecipientOut(BaseModel):
@@ -345,51 +315,35 @@ class CampaignOut(BaseModel):
     recipient_count: int = 0
     columns: list[str] = []
     project_name: str = ""
-
-
-# ---------- SMS templates (DLT) ----------
-class SmsTemplateIn(BaseModel):
-    name: str
-    template_id: str
-    sender_id: str = ""
-    body: str
-    is_active: bool = True
-
-
-class SmsTemplateOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    name: str
-    template_id: str
-    sender_id: str
-    body: str
-    is_active: bool
-
-
-class SmsValidateIn(BaseModel):
-    template_ref: int
-    message: str
-
-
-class SmsValidateOut(BaseModel):
-    valid: bool
-    reason: str = ""
-
-
-class PreviewIn(BaseModel):
-    channel: str
-    subject: str = ""
-    body: str = ""
-    recipient_id: int | None = None
-
-
-class PreviewOut(BaseModel):
-    subject: str
-    body: str
-    missing: list[str] = []
+    last_import_batch_id: str | None = None
 
 
 # ---------- message templates (library) ----------
+class BulletIn(BaseModel):
+    label: str = ""
+    text: str = ""
+
+
+class TemplateFields(BaseModel):
+    """Structured content for an Email template -- see app/email_template.py.
+    Never contains raw HTML, only plain field values."""
+    headline: str = ""
+    opening_line: str = ""
+    show_bullets: bool = False
+    campaign_name: str = ""
+    bullets: list[BulletIn] = []
+    show_callout: bool = False
+    callout_label: str = ""
+    callout_text: str = ""
+    show_cta: bool = False
+    action_url: str = ""
+    action_label: str = ""
+    show_badges: bool = False
+    show_secondary: bool = False
+    secondary_action_url: str = ""
+    secondary_action_label: str = ""
+
+
 class TemplateCategoryIn(BaseModel):
     name: str
 
@@ -436,10 +390,19 @@ class WhatsappTemplateContentOut(BaseModel):
     buttons: list
 
 
+class TemplateAttachmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    filename: str
+    content_type: str
+    size_bytes: int
+    created_at: datetime | None = None
+
+
 class TemplateCreate(BaseModel):
     name: str
     description: str = ""
-    channel: str  # email|whatsapp|sms -- immutable after creation
+    channel: str  # email|whatsapp -- immutable after creation
     category_id: int | None = None
     email_content: EmailTemplateContentIn | None = None
     whatsapp_content: WhatsappTemplateContentIn | None = None
@@ -469,10 +432,59 @@ class TemplateOut(BaseModel):
     updated_at: datetime | None = None
     email_content: EmailTemplateContentOut | None = None
     whatsapp_content: WhatsappTemplateContentOut | None = None
+    attachments: list[TemplateAttachmentOut] = []
 
 
 class TemplateLibraryPreviewIn(BaseModel):
     recipient_id: int | None = None
+
+
+class TemplatePreviewOut(BaseModel):
+    html: str
+    missing: list[str] = []
+
+
+# ---------- SMS templates (DLT) ----------
+class SmsTemplateIn(BaseModel):
+    name: str
+    template_id: str
+    sender_id: str = ""
+    body: str
+    is_active: bool = True
+
+
+class SmsTemplateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    template_id: str
+    sender_id: str
+    body: str
+    is_active: bool
+    created_at: datetime | None = None
+
+
+class SmsValidateIn(BaseModel):
+    template_ref: int
+    message: str
+
+
+class SmsValidateOut(BaseModel):
+    valid: bool
+    reason: str = ""
+
+
+class PreviewIn(BaseModel):
+    channel: str
+    subject: str = ""
+    body: str = ""
+    recipient_id: int | None = None
+
+
+class PreviewOut(BaseModel):
+    subject: str
+    body: str
+    missing: list[str] = []
 
 
 # ---------- suppression list ----------
@@ -518,3 +530,66 @@ class SummaryOut(BaseModel):
     pending: int
     suppressed: int
     status: str
+
+
+# ---------- dataset validation (AI Smart Data Validation) ----------
+class ValidationIssueOut(BaseModel):
+    row_number: int
+    field: str | None
+    severity: str
+    issue_type: str
+    description: str
+    suggested_fix: str | None
+    fix_id: str
+
+
+class QualityScoreOut(BaseModel):
+    overall: int
+    label: str
+    breakdown: dict[str, int]
+
+
+class ValidationSummaryOut(BaseModel):
+    total_rows: int
+    empty_rows_skipped: int
+    valid_rows: int
+    invalid_rows: int
+    warning_rows: int
+    duplicate_rows: int
+    ready_for_import: int
+    ready_for_import_with_overrides: int
+
+
+class ColumnMappingSuggestion(BaseModel):
+    header: str
+    target_field: str | None
+    sample_values: list[str] = []
+
+
+class ValidationSessionOut(BaseModel):
+    id: int
+    campaign_id: int
+    original_filename: str
+    status: str
+    mapping_confirmed: bool
+    column_mapping: dict[str, str | None]
+    mapping_suggestions: list[ColumnMappingSuggestion] = []
+    target_fields: list[str] = []
+    mandatory_targets: list[str] = []
+    issues: list[ValidationIssueOut]
+    summary: ValidationSummaryOut
+    quality_score: QualityScoreOut
+    encoding_warning: bool = False
+
+
+class ColumnMappingIn(BaseModel):
+    column_mapping: dict[str, str | None]
+
+
+class ApplyFixesIn(BaseModel):
+    fix_ids: list[str] = []
+    accept_all: bool = False
+
+
+class DatasetImportIn(BaseModel):
+    mode: Literal["valid_only", "ignore_warnings"] = "valid_only"

@@ -63,8 +63,9 @@ class Project(Base):
     logo_url: Mapped[str] = mapped_column(String(300), default="")
     status: Mapped[str] = mapped_column(String(20), default="active")  # active|inactive|archived
 
-    # Branding used by the "branded template" email content mode (CompanyName /
-    # CompanyLogoUrl come from `name` / `logo_url` above -- not duplicated here).
+    # Branding used by the message template library's Email content (see
+    # app/email_template.py) -- CompanyName/CompanyLogoUrl come from `name` /
+    # `logo_url` above, not duplicated here.
     company_website: Mapped[str] = mapped_column(String(300), default="")
     company_address: Mapped[str] = mapped_column(String(300), default="")
     sender_name: Mapped[str] = mapped_column(String(160), default="")
@@ -167,6 +168,56 @@ class Recipient(Base):
     mobile: Mapped[str] = mapped_column(String(60), default="")
     data: Mapped[dict] = mapped_column(JSON, default=dict)  # all columns
     active: Mapped[bool] = mapped_column(default=True)  # inactive recipients are skipped on send
+    # Tags which validated-import batch this row came from (see
+    # DatasetValidationSession below) -- lets a bad import be undone by
+    # batch without touching recipients from other uploads.
+    batch_import_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+
+
+class DatasetValidationSession(Base):
+    """Staging area for the AI Smart Data Validation flow: a file is parsed
+    and validated into here first, and only copied into `Recipient` rows on
+    an explicit /import call. `raw_rows` is the untouched parse of the
+    uploaded file (kept for the error report's original row numbers);
+    `working_rows` is the copy that accepted AI-suggested fixes get applied
+    to, per the suggest-and-confirm flow (never auto-applied)."""
+    __tablename__ = "dataset_validation_sessions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), index=True)
+    campaign: Mapped[Campaign] = relationship()
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    original_filename: Mapped[str] = mapped_column(String(255), default="")
+
+    column_mapping: Mapped[dict] = mapped_column(JSON, default=dict)  # {source_header: target_field}
+    mapping_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    raw_rows: Mapped[list] = mapped_column(JSON, default=list)
+    working_rows: Mapped[list] = mapped_column(JSON, default=list)
+    issues: Mapped[list] = mapped_column(JSON, default=list)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    quality_score: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active|imported|cancelled
+    batch_import_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    imported_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ValidationOverrideLog(Base):
+    """Audit trail for the admin-only 'Ignore Warnings' import action (PRD
+    Sec. 11.1) -- who force-imported warning-flagged rows, when, how many,
+    and which warning types were bypassed."""
+    __tablename__ = "validation_override_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dataset_validation_sessions.id", ondelete="SET NULL"), nullable=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    warning_row_count: Mapped[int] = mapped_column(default=0)
+    warning_types: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class CampaignContent(Base):
@@ -177,21 +228,6 @@ class CampaignContent(Base):
     channel: Mapped[str] = mapped_column(String(20))  # email|whatsapp|sms
     subject: Mapped[str] = mapped_column(String(300), default="")
     body: Mapped[str] = mapped_column(Text, default="")
-
-    # "plain" (default, free-typed text) or "template" (email-only: fixed
-    # branded HTML shell filled from `template_fields`, see app/email_template.py).
-    content_mode: Mapped[str] = mapped_column(String(20), default="plain")
-    template_fields: Mapped[dict] = mapped_column(JSON, default=dict)
-
-    # Which library `templates` row this content was copied from, if any (see
-    # Template below). This is a snapshot, not a live pointer: once copied,
-    # editing the source template never changes this row, and editing this
-    # row never changes the source template. Kept only so reporting can
-    # answer "which campaigns used template X" without a hand-maintained
-    # back-reference.
-    source_template_id: Mapped[int | None] = mapped_column(
-        ForeignKey("templates.id", ondelete="SET NULL"), nullable=True
-    )
 
 
 class CampaignAttachment(Base):
@@ -220,10 +256,12 @@ class TemplateCategory(Base):
 
 class Template(Base):
     """Workspace-wide reusable message template (shared across all projects --
-    rendered with whichever project's branding is active at use-time). One
-    row here is the umbrella metadata; the actual channel content lives in
-    a 1:1 EmailTemplateContent/WhatsappTemplateContent row, or (for SMS) in
-    the pre-existing SmsTemplate row via SmsTemplate.parent_template_id.
+    rendered with whichever project's branding is active at preview-time).
+    One row here is the umbrella metadata; the actual channel content lives in
+    a 1:1 EmailTemplateContent/WhatsappTemplateContent row. SMS templates are
+    managed separately as `SmsTemplate` rows (DLT registration has no
+    "draft/published" concept and no per-project branding), surfaced
+    alongside these in the Templates page but not stored in this table.
 
     `channel` is immutable after creation -- a different channel needs a
     different content shape, so users duplicate into a new template instead
@@ -233,7 +271,7 @@ class Template(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(160))
     description: Mapped[str] = mapped_column(Text, default="")
-    channel: Mapped[str] = mapped_column(String(20))  # email|whatsapp|sms
+    channel: Mapped[str] = mapped_column(String(20))  # email|whatsapp
     category_id: Mapped[int | None] = mapped_column(ForeignKey("template_categories.id"), nullable=True)
     category: Mapped[TemplateCategory | None] = relationship()
     status: Mapped[str] = mapped_column(String(20), default="draft")  # draft|published|archived
@@ -247,14 +285,15 @@ class Template(Base):
     whatsapp_content: Mapped["WhatsappTemplateContent"] = relationship(
         back_populates="template", uselist=False, cascade="all, delete-orphan"
     )
+    attachments: Mapped[list["TemplateAttachment"]] = relationship(
+        back_populates="template", cascade="all, delete-orphan"
+    )
 
 
 class EmailTemplateContent(Base):
     """1:1 with a Template where channel == 'email'. Same structured-field
-    shape as CampaignContent.template_fields (see schemas.TemplateFields) --
-    rendered through the same fixed branded shell in app/email_template.py,
-    not a free-form HTML editor (that path was deliberately closed off, see
-    HTML_TAG_RE in routers/campaigns.py)."""
+    shape as schemas.TemplateFields -- rendered through the fixed branded
+    shell in app/email_template.py, not a free-form HTML editor."""
     __tablename__ = "email_template_content"
     template_id: Mapped[int] = mapped_column(ForeignKey("templates.id", ondelete="CASCADE"), primary_key=True)
     template: Mapped[Template] = relationship(back_populates="email_content")
@@ -281,6 +320,21 @@ class WhatsappTemplateContent(Base):
     buttons: Mapped[list] = mapped_column(JSON, default=list)
 
 
+class TemplateAttachment(Base):
+    """A file attached to an Email template -- shown to anyone using the
+    template as a suggested/standard attachment. Same local-disk storage as
+    CampaignAttachment (see app/storage.py)."""
+    __tablename__ = "template_attachments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    template_id: Mapped[int] = mapped_column(ForeignKey("templates.id", ondelete="CASCADE"), index=True)
+    template: Mapped[Template] = relationship(back_populates="attachments")
+    filename: Mapped[str] = mapped_column(String(255))
+    content_type: Mapped[str] = mapped_column(String(120), default="application/octet-stream")
+    storage_path: Mapped[str] = mapped_column(String(300))
+    size_bytes: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class SmsTemplate(Base):
     __tablename__ = "sms_templates"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -290,13 +344,6 @@ class SmsTemplate(Base):
     body: Mapped[str] = mapped_column(Text)               # exact registered text, variables as {#var#} or {{var}}
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-
-    # Library umbrella row for this SMS template (see Template above). Nullable
-    # so pre-existing rows created before this module shipped keep working
-    # unchanged -- a backfill migration links them to a generated Template row.
-    parent_template_id: Mapped[int | None] = mapped_column(
-        ForeignKey("templates.id", ondelete="SET NULL"), nullable=True
-    )
 
 
 class Suppression(Base):

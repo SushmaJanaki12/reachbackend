@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import Layout from '../components/Layout'
 import api, { apiError } from '../api'
 import { useAuth } from '../auth'
@@ -20,7 +21,6 @@ export default function Settings() {
         <SmsPanel />
       </div>
       {can('system.configure') && <AdminSmtpSettings />}
-      <SmsTemplates />
     </Layout>
   )
 }
@@ -134,6 +134,7 @@ function SmsPanel() {
         <>
           <ConnRow label="Sender ID" value={status.sender} />
           <ConnRow label="DLT template" value={status.template_id} />
+          <p className="t-sub mt8">Manage registered DLT templates under <Link to="/templates">Templates</Link>.</p>
           <div className="field mt16">
             <label>Send a test SMS</label>
             <input className="input" placeholder="Mobile number" value={testTo} onChange={(e) => setTestTo(e.target.value)} style={{ marginBottom: 8 }} />
@@ -340,95 +341,3 @@ function AdminSmtpModal({ initial, toast, onClose, onSaved, onError }) {
   )
 }
 
-const BLANK_TPL = { name: '', template_id: '', sender_id: '', body: '', is_active: true }
-
-function SmsTemplates() {
-  const toast = useToast()
-  const [items, setItems] = useState(null)
-  const [editing, setEditing] = useState(null)
-
-  const load = () => api.get('/sms/templates').then((r) => setItems(r.data)).catch(() => setItems([]))
-  useEffect(() => { load() }, [])
-
-  const remove = async (t) => {
-    try { await api.delete(`/sms/templates/${t.id}`); load(); toast.ok('Template deleted') }
-    catch (e) { toast.err(apiError(e)) }
-  }
-
-  return (
-    <div className="card">
-      <div className="card-pad flex between">
-        <div>
-          <h3 style={{ fontSize: 16 }}>SMS DLT templates</h3>
-          <p className="t-sub">Registered templates campaigns validate their SMS content against (India DLT).</p>
-        </div>
-        <button className="btn btn-primary btn-sm" onClick={() => setEditing({ ...BLANK_TPL })}><Icon.plus width={14} /> Add template</button>
-      </div>
-      {items === null ? <Spinner /> : items.length === 0 ? (
-        <div className="empty" style={{ padding: '30px 20px' }}><p className="muted">No DLT templates yet.</p></div>
-      ) : (
-        <div className="table-wrap" style={{ border: 'none', borderRadius: 0, boxShadow: 'none' }}>
-          <table>
-            <thead><tr><th>Name</th><th>Template ID</th><th>Sender</th><th>Text</th><th></th></tr></thead>
-            <tbody>
-              {items.map((t) => (
-                <tr key={t.id}>
-                  <td className="t-strong">{t.name}</td>
-                  <td className="muted" style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{t.template_id}</td>
-                  <td><span className="badge teal"><span className="d" />{t.sender_id || '—'}</span></td>
-                  <td className="muted" style={{ maxWidth: 340, fontSize: 12.5 }}>{t.body}</td>
-                  <td style={{ textAlign: 'right' }}>
-                    <div className="flex gap8" style={{ justifyContent: 'flex-end' }}>
-                      <button className="btn btn-ghost btn-sm" onClick={() => setEditing(t)}><Icon.edit width={13} /></button>
-                      <button className="btn btn-ghost btn-sm" onClick={() => remove(t)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {editing && (
-        <TemplateModal initial={editing} onClose={() => setEditing(null)}
-          onSaved={() => { setEditing(null); load(); toast.ok('Template saved') }}
-          onError={(m) => toast.err(m)} />
-      )}
-    </div>
-  )
-}
-
-function TemplateModal({ initial, onClose, onSaved, onError }) {
-  const isNew = !initial.id
-  const [f, setF] = useState(initial)
-  const [busy, setBusy] = useState(false)
-  const set = (k, v) => setF((s) => ({ ...s, [k]: v }))
-
-  const save = async () => {
-    setBusy(true)
-    const payload = { name: f.name, template_id: f.template_id, sender_id: f.sender_id, body: f.body, is_active: f.is_active }
-    try {
-      if (isNew) await api.post('/sms/templates', payload)
-      else await api.put(`/sms/templates/${initial.id}`, payload)
-      onSaved()
-    } catch (e) { onError(apiError(e)) } finally { setBusy(false) }
-  }
-
-  return (
-    <Modal title={isNew ? 'Add DLT template' : `Edit — ${initial.name}`} onClose={onClose}
-      footer={<>
-        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" onClick={save} disabled={busy || !f.name || !f.template_id || !f.body}>{busy ? 'Saving…' : 'Save template'}</button>
-      </>}>
-      <div className="row-2">
-        <Field label="Template name *"><input className="input" value={f.name} onChange={(e) => set('name', e.target.value)} placeholder="Autumn promo" /></Field>
-        <Field label="Sender ID"><input className="input" value={f.sender_id} onChange={(e) => set('sender_id', e.target.value)} placeholder="MISTAE" /></Field>
-      </div>
-      <Field label="DLT template ID *"><input className="input" value={f.template_id} onChange={(e) => set('template_id', e.target.value)} placeholder="1707168726031344535" /></Field>
-      <Field label="Registered template text *" hint="Use {#var#} or {{var}} for variable parts — exactly as approved by the operator.">
-        <textarea className="textarea" value={f.body} onChange={(e) => set('body', e.target.value)}
-          placeholder="Dear customer, ... {#var#} ..." />
-      </Field>
-    </Modal>
-  )
-}

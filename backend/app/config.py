@@ -44,6 +44,21 @@ class Settings(BaseSettings):
     sms_rate_per_second: float = 5.0
     send_max_retries: int = 3
 
+    # OpenAI: enhances dataset-validation column-mapping and fix suggestions.
+    # Leave blank to use the deterministic heuristic (alias table + fuzzy
+    # match / domain-typo dictionary) only -- same "blank creds = simulated"
+    # pattern as email/SMS above. A slow/erroring call always falls back to
+    # the heuristic rather than failing the upload.
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+
+    # Dataset validation (AI Smart Data Validation): synchronous processing
+    # only for now, so caps keep a single request fast. Revisit if real
+    # uploads need the async path described in the PRD.
+    dataset_validation_max_rows: int = 20_000
+    dataset_validation_max_file_mb: float = 25.0
+    dataset_validation_session_ttl_minutes: int = 120
+
     @property
     def cors_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
@@ -56,6 +71,10 @@ class Settings(BaseSettings):
     @property
     def sms_configured(self) -> bool:
         return all([self.sms_username, self.sms_password, self.sms_from, self.sms_api_url])
+
+    @property
+    def ai_suggestions_configured(self) -> bool:
+        return bool(self.openai_api_key)
 
 
 settings = Settings()

@@ -1,5 +1,5 @@
 import app.worker as worker_mod
-from tests.conftest import make_campaign, drain_queue
+from tests.conftest import make_campaign, drain_queue, upload_dataset
 
 CSV = (
     "Name,Email Address,Mobile Number,Company\n"
@@ -9,8 +9,7 @@ CSV = (
 
 
 def _upload(client, headers, cid, csv=CSV):
-    return client.post(f"/api/campaigns/{cid}/dataset", headers=headers,
-                       files={"file": ("data.csv", csv, "text/csv")})
+    return upload_dataset(client, headers, cid, csv)
 
 
 def _configure_real_providers(monkeypatch):

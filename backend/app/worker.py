@@ -45,7 +45,6 @@ from rq import get_current_job
 from .campaign_utils import render_template
 from .config import settings
 from .database import SessionLocal
-from .email_template import render_email_template
 from .mailer import send_campaign_email, project_smtp_ready, email_channel_configured, MailError
 from .models import Campaign, Message, Recipient, SmsTemplate, Suppression
 from .routers.suppressions import normalize_contact
@@ -142,11 +141,7 @@ def process_message(message_id: int) -> None:
             if msg.channel == "email" and email_channel_configured(campaign.project):
                 missing: list[str] = []
                 subject = render_template(content.subject, data, missing) if content else ""
-                is_html = bool(content and content.content_mode == "template")
-                if is_html:
-                    body = render_email_template(campaign.project, content.template_fields or {}, recipient, missing)
-                else:
-                    body = render_template(content.body, data, missing) if content else ""
+                body = render_template(content.body, data, missing) if content else ""
                 if missing:
                     names = ", ".join(sorted(set(missing)))
                     logger.warning(
@@ -158,9 +153,7 @@ def process_message(message_id: int) -> None:
                     (a.filename, read_campaign_attachment(a.storage_path), a.content_type)
                     for a in campaign.attachments
                 ] or None
-                pid = send_campaign_email(campaign.project, msg.to_address, subject, body, is_html=True,
-                                          attachments=attachments) if is_html \
-                    else send_campaign_email(campaign.project, msg.to_address, subject, body, attachments=attachments)
+                pid = send_campaign_email(campaign.project, msg.to_address, subject, body, attachments=attachments)
                 msg.status, msg.sent_at, msg.provider_id = "sent", now, pid
             elif msg.channel == "sms" and settings.sms_configured:
                 body = render_template(content.body, data) if content else ""

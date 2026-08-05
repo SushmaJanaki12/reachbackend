@@ -1,4 +1,4 @@
-from tests.conftest import make_campaign
+import uuid
 
 EMAIL_FIELDS = {
     "headline": "Big News",
@@ -43,6 +43,7 @@ def test_create_email_template(client, admin_headers):
     assert tpl["status"] == "draft"
     assert tpl["email_content"]["subject"] == "Welcome, {{Name}}!"
     assert tpl["email_content"]["fields"]["headline"] == "Big News"
+    assert tpl["attachments"] == []
 
 
 def test_create_whatsapp_template_requires_content(client, admin_headers):
@@ -60,7 +61,35 @@ def test_create_whatsapp_template(client, admin_headers):
 
 
 def test_create_sms_template_via_library_endpoint_is_blocked(client, admin_headers):
+    """SMS templates are DLT-registered and stay in their own table, managed
+    via /api/sms/templates -- this umbrella table only ever holds email and
+    whatsapp content (see routers/templates.py CREATABLE_CHANNELS)."""
     r = client.post("/api/templates", headers=admin_headers, json={"name": "SMS", "channel": "sms"})
+    assert r.status_code == 400
+
+
+# ---------- categories ----------
+def _unique_name(prefix):
+    return f"{prefix} {uuid.uuid4().hex[:8]}"
+
+
+def test_create_category_then_use_it(client, admin_headers):
+    name = _unique_name("Newsletters")
+    r = client.post("/api/template-categories", headers=admin_headers, json={"name": name})
+    assert r.status_code == 200, r.text
+    cat = r.json()
+
+    tpl = client.post("/api/templates", headers=admin_headers, json={
+        "name": "Monthly Update", "channel": "email", "category_id": cat["id"],
+        "email_content": {"subject": "Hi", "fields": EMAIL_FIELDS},
+    }).json()
+    assert tpl["category"]["name"] == name
+
+
+def test_create_duplicate_category_name_rejected(client, admin_headers):
+    name = _unique_name("Promos")
+    client.post("/api/template-categories", headers=admin_headers, json={"name": name})
+    r = client.post("/api/template-categories", headers=admin_headers, json={"name": name})
     assert r.status_code == 400
 
 
@@ -70,13 +99,6 @@ def test_list_templates_filters_by_channel(client, admin_headers):
     r = client.get("/api/templates", headers=admin_headers, params={"channel": "email"})
     assert r.status_code == 200
     assert all(t["channel"] == "email" for t in r.json())
-
-
-def test_seeded_sms_template_is_listed_via_backfill(client, admin_headers):
-    r = client.get("/api/templates", headers=admin_headers, params={"channel": "sms"})
-    assert r.status_code == 200
-    names = [t["name"] for t in r.json()]
-    assert "MISTA EATS — OTP" in names
 
 
 def test_list_templates_search_by_name(client, admin_headers):
@@ -97,7 +119,6 @@ def test_duplicate_creates_independent_draft_copy(client, admin_headers):
     assert copy["status"] == "draft"
     assert copy["email_content"]["subject"] == tpl["email_content"]["subject"]
 
-    # Editing the copy doesn't touch the original.
     client.put(f"/api/templates/{copy['id']}", headers=admin_headers, json={
         "email_content": {"subject": "Changed", "fields": EMAIL_FIELDS},
     })
@@ -140,20 +161,6 @@ def test_delete_unused_draft_succeeds(client, admin_headers):
     assert client.get(f"/api/templates/{tpl['id']}", headers=admin_headers).status_code == 404
 
 
-def test_delete_blocked_when_used_by_a_campaign(client, admin_headers, project):
-    tpl = _create_email_template(client, admin_headers, status="published")
-    c = make_campaign(client, admin_headers, project["id"])
-    r = client.post(f"/api/campaigns/{c['id']}/content/email/from-template/{tpl['id']}", headers=admin_headers)
-    assert r.status_code == 200, r.text
-
-    r2 = client.delete(f"/api/templates/{tpl['id']}", headers=admin_headers)
-    assert r2.status_code == 409
-
-    # Archiving the same template remains allowed.
-    r3 = client.post(f"/api/templates/{tpl['id']}/archive", headers=admin_headers)
-    assert r3.status_code == 200
-
-
 # ---------- preview ----------
 def test_preview_email_template_renders_shell(client, admin_headers):
     tpl = _create_email_template(client, admin_headers)
@@ -173,44 +180,37 @@ def test_preview_whatsapp_template_renders_body(client, admin_headers):
     assert "your order" in p.json()["html"]
 
 
-def test_preview_sms_template_is_rejected(client, admin_headers):
-    r = client.get("/api/templates", headers=admin_headers, params={"channel": "sms"})
-    sms_tpl_id = r.json()[0]["id"]
-    p = client.post(f"/api/templates/{sms_tpl_id}/preview", headers=admin_headers, json={})
-    assert p.status_code == 400
-
-
-# ---------- campaign integration (snapshot) ----------
-def test_from_template_snapshots_content_and_is_independent_of_source(client, admin_headers, project):
-    tpl = _create_email_template(client, admin_headers, status="published")
-    c = make_campaign(client, admin_headers, project["id"])
-    r = client.post(f"/api/campaigns/{c['id']}/content/email/from-template/{tpl['id']}", headers=admin_headers)
+# ---------- attachments (email only) ----------
+def test_email_template_attachment_upload_list_delete(client, admin_headers):
+    tpl = _create_email_template(client, admin_headers)
+    r = client.post(f"/api/templates/{tpl['id']}/attachments", headers=admin_headers,
+                     files={"file": ("brochure.pdf", b"%PDF-1.4 fake", "application/pdf")})
     assert r.status_code == 200, r.text
-    content = r.json()
-    assert content["content_mode"] == "template"
-    assert content["subject"] == "Welcome, {{Name}}!"
-    assert content["template_fields"]["headline"] == "Big News"
+    att = r.json()
+    assert att["filename"] == "brochure.pdf"
 
-    # Editing the campaign's copy afterward doesn't touch the source template.
-    client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers, json={
-        "subject": "Campaign-only change",
-        "content_mode": "template",
-        "template_fields": {**EMAIL_FIELDS, "headline": "Campaign-only headline"},
+    listed = client.get(f"/api/templates/{tpl['id']}/attachments", headers=admin_headers)
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+
+    d = client.delete(f"/api/templates/{tpl['id']}/attachments/{att['id']}", headers=admin_headers)
+    assert d.status_code == 200
+    assert client.get(f"/api/templates/{tpl['id']}/attachments", headers=admin_headers).json() == []
+
+
+def test_whatsapp_template_rejects_attachments(client, admin_headers):
+    r = client.post("/api/templates", headers=admin_headers, json={
+        "name": "WA No Attach", "channel": "whatsapp", "whatsapp_content": WHATSAPP_CONTENT,
     })
-    original = client.get(f"/api/templates/{tpl['id']}", headers=admin_headers).json()
-    assert original["email_content"]["fields"]["headline"] == "Big News"
-
-    # Editing the source template afterward doesn't touch the campaign's copy.
-    client.put(f"/api/templates/{tpl['id']}", headers=admin_headers, json={
-        "email_content": {"subject": "Source changed", "fields": {**EMAIL_FIELDS, "headline": "Source changed"}},
-    })
-    campaign_content = client.get(f"/api/campaigns/{c['id']}/content", headers=admin_headers).json()
-    email_content = next(x for x in campaign_content if x["channel"] == "email")
-    assert email_content["template_fields"]["headline"] == "Campaign-only headline"
+    tpl = r.json()
+    up = client.post(f"/api/templates/{tpl['id']}/attachments", headers=admin_headers,
+                      files={"file": ("x.pdf", b"data", "application/pdf")})
+    assert up.status_code == 400
 
 
-def test_from_template_rejects_unpublished_template(client, admin_headers, project):
-    tpl = _create_email_template(client, admin_headers)  # still draft
-    c = make_campaign(client, admin_headers, project["id"])
-    r = client.post(f"/api/campaigns/{c['id']}/content/email/from-template/{tpl['id']}", headers=admin_headers)
-    assert r.status_code == 400
+def test_deleting_email_template_cleans_up_attachments(client, admin_headers):
+    tpl = _create_email_template(client, admin_headers)
+    client.post(f"/api/templates/{tpl['id']}/attachments", headers=admin_headers,
+                files={"file": ("a.pdf", b"data", "application/pdf")})
+    r = client.delete(f"/api/templates/{tpl['id']}", headers=admin_headers)
+    assert r.status_code == 200

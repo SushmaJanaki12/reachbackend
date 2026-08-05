@@ -233,8 +233,8 @@ function BrandingTab({ f, set }) {
   return (
     <>
       <p className="muted" style={{ fontSize: 13, marginTop: -4, marginBottom: 16 }}>
-        Used by the "branded template" email content mode — set once here, reused across every
-        campaign in this project. Company name and logo come from the Details tab.
+        Used by Email templates in the Templates library — set once here, reused across every
+        Email template rendered for this project. Company name and logo come from the Details tab.
       </p>
       <div className="row-2">
         <Field label="Company website"><input className="input" value={f.company_website} onChange={(e) => set('company_website', e.target.value)} placeholder="https://acme.com" /></Field>
@@ -245,7 +245,7 @@ function BrandingTab({ f, set }) {
         <Field label="Sender designation"><input className="input" value={f.sender_designation} onChange={(e) => set('sender_designation', e.target.value)} placeholder="Growth Lead" /></Field>
       </div>
       <Field label="Sender phone"><input className="input" value={f.sender_phone} onChange={(e) => set('sender_phone', e.target.value)} placeholder="+1 555 0100" /></Field>
-      <p className="t-sub" style={{ marginTop: 16, marginBottom: 6 }}>Trust badges (optional, shown when a campaign enables the badges block)</p>
+      <p className="t-sub" style={{ marginTop: 16, marginBottom: 6 }}>Trust badges (optional, shown when a template enables the badges block)</p>
       <div className="row-3">
         <Field label="Badge 1 URL"><input className="input" value={f.badge1_url} onChange={(e) => set('badge1_url', e.target.value)} placeholder="https://…" /></Field>
         <Field label="Badge 2 URL"><input className="input" value={f.badge2_url} onChange={(e) => set('badge2_url', e.target.value)} placeholder="https://…" /></Field>

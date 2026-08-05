@@ -1,14 +1,4 @@
 from app.email_template import render_email_template
-from app.models import Recipient
-from tests.conftest import make_campaign, drain_queue
-
-CSV = "Name,Email Address,Mobile Number,Company\nAlice,alice@example.com,9876543210,Acme\n"
-
-
-def _upload(client, headers, cid, csv=CSV):
-    return client.post(f"/api/campaigns/{cid}/dataset", headers=headers,
-                       files={"file": ("data.csv", csv, "text/csv")})
-
 
 FULL_FIELDS = {
     "headline": "Big News",
@@ -62,7 +52,6 @@ class _Recipient:
     data = {"Company": "Acme"}
 
 
-# ---------- pure render function ----------
 def test_render_with_all_blocks_enabled_includes_every_field():
     html = render_email_template(_Project(), FULL_FIELDS, _Recipient())
     assert "Big News" in html
@@ -81,7 +70,6 @@ def test_render_with_all_blocks_enabled_includes_every_field():
 def test_render_with_all_blocks_disabled_strips_every_optional_section():
     html = render_email_template(_Project(), BLANK_FIELDS, _Recipient())
     assert "Just the basics" in html
-    # None of the optional-block-only content should be present.
     for leftover in ("BulletLabel", "Speed", "Twice as fast", "Reply to this email",
                       "Get started", "Learn more", "b1.png", "b2.png", "b3.png"):
         assert leftover not in html
@@ -121,112 +109,3 @@ def test_render_tracks_missing_recipient_placeholder():
 def test_render_without_recipient_leaves_name_email_blank():
     html = render_email_template(_Project(), BLANK_FIELDS, None)
     assert "Hi <strong></strong>" in html
-
-
-# ---------- API integration ----------
-def test_set_content_template_mode_saves_and_ignores_body(client, admin_headers, project):
-    c = make_campaign(client, admin_headers, project["id"])
-    _upload(client, admin_headers, c["id"])
-    r = client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers, json={
-        "subject": "Hi {{Name}}",
-        "body": "this should be ignored in template mode",
-        "content_mode": "template",
-        "template_fields": FULL_FIELDS,
-    })
-    assert r.status_code == 200, r.text
-    out = r.json()
-    assert out["content_mode"] == "template"
-    assert out["body"] == ""
-    assert out["template_fields"]["headline"] == "Big News"
-    assert len(out["template_fields"]["bullets"]) == 3
-
-
-def test_set_content_defaults_to_plain_mode(client, admin_headers, project):
-    """Existing plain-text campaigns are unaffected: omitting content_mode
-    still saves plain text exactly as before."""
-    c = make_campaign(client, admin_headers, project["id"])
-    r = client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers,
-                   json={"subject": "Hi {{Name}}", "body": "Hello {{Name}}"})
-    assert r.status_code == 200
-    out = r.json()
-    assert out["content_mode"] == "plain"
-    assert out["body"] == "Hello {{Name}}"
-    assert out["template_fields"]["headline"] == ""
-
-
-def test_template_mode_still_rejects_html_subject(client, admin_headers, project):
-    c = make_campaign(client, admin_headers, project["id"])
-    r = client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers, json={
-        "subject": "Hi <b>{{Name}}</b>",
-        "content_mode": "template",
-        "template_fields": FULL_FIELDS,
-    })
-    assert r.status_code == 400
-
-
-def test_preview_template_endpoint_renders_html_with_recipient_data(client, admin_headers, project):
-    c = make_campaign(client, admin_headers, project["id"])
-    _upload(client, admin_headers, c["id"])
-    r = client.post(f"/api/campaigns/{c['id']}/preview-template", headers=admin_headers, json={
-        "fields": FULL_FIELDS,
-    })
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert "Alice" in body["html"]
-    assert "Big News" in body["html"]
-    assert body["missing"] == []
-
-
-def test_preview_template_rejects_recipient_from_another_campaign(client, admin_headers, project):
-    c1 = make_campaign(client, admin_headers, project["id"], "T1")
-    c2 = make_campaign(client, admin_headers, project["id"], "T2")
-    _upload(client, admin_headers, c1["id"])
-    _upload(client, admin_headers, c2["id"])
-    other_id = client.get(f"/api/campaigns/{c2['id']}/recipients", headers=admin_headers).json()[0]["id"]
-
-    r = client.post(f"/api/campaigns/{c1['id']}/preview-template", headers=admin_headers, json={
-        "fields": BLANK_FIELDS, "recipient_id": other_id,
-    })
-    assert r.status_code == 404
-
-
-def test_send_template_mode_email_uses_is_html(client, admin_headers, project, monkeypatch):
-    """The worker send path must render the branded HTML and pass is_html=True
-    -- this is the one content mode allowed to bypass the plain-text escaping
-    used everywhere else."""
-    import app.worker as worker_mod
-    s = worker_mod.settings
-    monkeypatch.setattr(s, "azure_tenant_id", "tenant")
-    monkeypatch.setattr(s, "o365_client_id", "client")
-    monkeypatch.setattr(s, "o365_client_secret", "secret")
-    monkeypatch.setattr(s, "o365_from_email", "from@acme.com")
-
-    calls = []
-
-    def fake_send_campaign_email(project, to, subject, body, is_html=False, attachments=None):
-        calls.append({"to": to, "subject": subject, "body": body, "is_html": is_html})
-        return "provider-id"
-    monkeypatch.setattr(worker_mod, "send_campaign_email", fake_send_campaign_email)
-
-    c = make_campaign(client, admin_headers, project["id"])
-    _upload(client, admin_headers, c["id"])
-    client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers, json={
-        "subject": "Hi {{Name}}",
-        "content_mode": "template",
-        "template_fields": FULL_FIELDS,
-    })
-    client.put(f"/api/campaigns/{c['id']}", headers=admin_headers, json={"email_enabled": True})
-
-    send = client.post(f"/api/campaigns/{c['id']}/send", headers=admin_headers)
-    assert send.status_code == 200
-    drain_queue()
-
-    assert len(calls) == 1
-    assert calls[0]["is_html"] is True
-    assert "Big News" in calls[0]["body"]
-    assert "Alice" in calls[0]["body"]
-    assert calls[0]["subject"] == "Hi Alice"
-
-    summary = client.get(f"/api/campaigns/{c['id']}/summary", headers=admin_headers).json()
-    assert summary["status"] == "completed"
-    assert summary["failed"] == 0

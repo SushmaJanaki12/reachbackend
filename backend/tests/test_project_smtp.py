@@ -8,7 +8,7 @@ import smtplib
 from app.crypto import decrypt_secret
 from app.database import SessionLocal
 from app.models import Message, Project
-from tests.conftest import make_campaign, drain_queue
+from tests.conftest import make_campaign, drain_queue, upload_dataset
 
 CSV = "Name,Email Address,Mobile Number\nAlice,alice@example.com,9876543210\n"
 
@@ -136,8 +136,7 @@ def test_smtp_test_reuses_saved_password_when_payload_blank(client, admin_header
 
 def _ready_campaign(client, admin_headers, project_id):
     c = make_campaign(client, admin_headers, project_id)
-    client.post(f"/api/campaigns/{c['id']}/dataset", headers=admin_headers,
-               files={"file": ("data.csv", CSV, "text/csv")})
+    upload_dataset(client, admin_headers, c['id'], CSV)
     client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers,
               json={"subject": "Hi {{Name}}", "body": "Hello {{Name}}"})
     client.put(f"/api/campaigns/{c['id']}", headers=admin_headers, json={"email_enabled": True})

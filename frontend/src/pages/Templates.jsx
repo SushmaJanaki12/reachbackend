@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Layout from '../components/Layout'
 import { useAuth } from '../auth'
 import api, { apiError } from '../api'
@@ -11,10 +11,25 @@ const CHANNEL_OPTS = [
   { key: 'sms', label: 'SMS', icon: 'phone' },
 ]
 
+const NAME_PLACEHOLDER = { email: 'Welcome email', whatsapp: 'Order confirmation', sms: 'OTP verification' }
+
 const BLANK_WA_CONTENT = {
   meta_template_name: '', meta_template_id: '', language_code: 'en_US',
   header_type: 'none', header_content: '', body_text: '', footer_text: '', buttons: [],
 }
+
+const fmtSize = (n) => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB`)
+
+// SMS templates live in their own DLT-registered table (no draft/published
+// lifecycle) -- normalized into the same row shape as the Email/WhatsApp
+// library so they can share one table/filter UI. `_smsRaw` carries the
+// original object, since a PUT to /sms/templates/{id} requires every field.
+const smsToRow = (t) => ({
+  id: t.id, name: t.name, description: '', channel: 'sms', category: null,
+  status: t.is_active ? 'published' : 'archived',
+  created_at: t.created_at, updated_at: t.created_at,
+  _sms: true, _smsRaw: t,
+})
 
 export default function Templates() {
   const { can } = useAuth()
@@ -22,6 +37,10 @@ export default function Templates() {
   const canEdit = can('template.edit')
   const canArchive = can('template.archive')
   const canDelete = can('template.delete')
+  // SMS DLT templates carry telecom-compliance weight, so they stay gated
+  // behind the same permission Settings used to require for them.
+  const canManageSms = can('project.configure_channels') || can('system.configure')
+  const canCreate = canEdit || canManageSms
 
   const [items, setItems] = useState(null)
   const [categories, setCategories] = useState([])
@@ -30,17 +49,45 @@ export default function Templates() {
   const [q, setQ] = useState('')
   const [creating, setCreating] = useState(false)
   const [editingId, setEditingId] = useState(null)
+  const [editingSms, setEditingSms] = useState(null)
 
   const load = () => {
     setItems(null)
-    const params = {}
-    if (channel !== 'all') params.channel = channel
-    if (status !== 'all') params.status = status
-    if (q) params.q = q
-    api.get('/templates', { params }).then((r) => setItems(r.data)).catch(() => setItems([]))
+    const wantTemplates = channel !== 'sms'
+    const wantSms = channel === 'all' || channel === 'sms'
+
+    const templatesReq = wantTemplates
+      ? api.get('/templates', {
+          params: {
+            ...(channel !== 'all' ? { channel } : {}),
+            ...(status !== 'all' ? { status } : {}),
+            ...(q ? { q } : {}),
+          },
+        }).then((r) => r.data).catch(() => [])
+      : Promise.resolve([])
+
+    const smsReq = wantSms
+      ? api.get('/sms/templates').then((r) => r.data.map(smsToRow)).catch(() => [])
+      : Promise.resolve([])
+
+    Promise.all([templatesReq, smsReq]).then(([tpl, sms]) => {
+      let merged = [...tpl, ...sms]
+      if (wantSms) {
+        merged = merged.filter((t) => {
+          if (!t._sms) return true
+          if (status !== 'all' && t.status !== status) return false
+          if (q && !t.name.toLowerCase().includes(q.toLowerCase())) return false
+          return true
+        })
+      }
+      merged.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0))
+      setItems(merged)
+    })
   }
   useEffect(() => { load() }, [channel, status, q])
   useEffect(() => { api.get('/template-categories').then((r) => setCategories(r.data)).catch(() => {}) }, [])
+
+  const addCategory = (cat) => setCategories((c) => [...c, cat].sort((a, b) => a.name.localeCompare(b.name)))
 
   const duplicate = async (t) => {
     try { await api.post(`/templates/${t.id}/duplicate`); toast.ok('Template duplicated'); load() }
@@ -59,14 +106,29 @@ export default function Templates() {
     catch (e) { toast.err(apiError(e)) }
   }
 
+  const smsToggleActive = async (raw) => {
+    try {
+      await api.put(`/sms/templates/${raw.id}`, {
+        name: raw.name, template_id: raw.template_id, sender_id: raw.sender_id,
+        body: raw.body, is_active: !raw.is_active,
+      })
+      toast.ok(raw.is_active ? 'Template archived' : 'Template restored')
+      load()
+    } catch (e) { toast.err(apiError(e)) }
+  }
+  const smsRemove = async (raw) => {
+    try { await api.delete(`/sms/templates/${raw.id}`); toast.ok('Template deleted'); load() }
+    catch (e) { toast.err(apiError(e)) }
+  }
+
   return (
     <Layout title="Templates" crumb="Workspace / Templates">
       <div className="page-head">
         <div>
           <div className="pt">Message templates</div>
-          <div className="ps">Reusable Email &amp; WhatsApp content, shared across every project.</div>
+          <div className="ps">Reusable Email, WhatsApp &amp; SMS content, shared across every project.</div>
         </div>
-        {canEdit && (
+        {canCreate && (
           <button className="btn btn-primary" onClick={() => setCreating(true)}><Icon.plus width={16} /> New template</button>
         )}
       </div>
@@ -89,8 +151,8 @@ export default function Templates() {
         <div className="card empty">
           <div className="ico"><Icon.mail width={24} /></div>
           <h3 style={{ marginBottom: 6 }}>No templates yet</h3>
-          <p className="muted" style={{ marginBottom: 16 }}>Create a reusable Email or WhatsApp template for your campaigns.</p>
-          {canEdit && <button className="btn btn-primary" onClick={() => setCreating(true)}><Icon.plus width={16} /> New template</button>}
+          <p className="muted" style={{ marginBottom: 16 }}>Create a reusable Email, WhatsApp or SMS template for your campaigns.</p>
+          {canCreate && <button className="btn btn-primary" onClick={() => setCreating(true)}><Icon.plus width={16} /> New template</button>}
         </div>
       ) : (
         <div className="table-wrap">
@@ -100,11 +162,14 @@ export default function Templates() {
               {items.map((t) => {
                 const c = CHANNEL_OPTS.find((x) => x.key === t.channel)
                 const Ico = c ? Icon[c.icon] : Icon.mail
-                const editable = t.channel !== 'sms'
+                const rowCanEdit = t._sms ? canManageSms : canEdit
+                const rowCanArchive = t._sms ? canManageSms : canArchive
+                const rowCanDelete = t._sms ? canManageSms : canDelete
+                const openEditor = () => (t._sms ? setEditingSms(t._smsRaw) : setEditingId(t.id))
                 return (
-                  <tr key={t.id}>
-                    <td className="t-strong" style={{ cursor: editable ? 'pointer' : 'default' }}
-                      onClick={() => editable && setEditingId(t.id)}>
+                  <tr key={`${t._sms ? 'sms' : 'tpl'}-${t.id}`}>
+                    <td className="t-strong" style={{ cursor: rowCanEdit ? 'pointer' : 'default' }}
+                      onClick={() => rowCanEdit && openEditor()}>
                       {t.name}{t.description && <div className="t-sub">{t.description}</div>}
                     </td>
                     <td><span className="chchip on"><Ico width={12} /> {c?.label || t.channel}</span></td>
@@ -113,22 +178,21 @@ export default function Templates() {
                     <td className="muted">{t.updated_at ? new Date(t.updated_at).toLocaleDateString() : '—'}</td>
                     <td style={{ textAlign: 'right' }}>
                       <div className="flex gap8" style={{ justifyContent: 'flex-end' }}>
-                        {editable && canEdit && (
-                          <button className="btn btn-ghost btn-sm" onClick={() => setEditingId(t.id)}><Icon.edit width={13} /></button>
+                        {rowCanEdit && (
+                          <button className="btn btn-ghost btn-sm" onClick={openEditor}><Icon.edit width={13} /></button>
                         )}
-                        {editable && canEdit && (
+                        {!t._sms && rowCanEdit && (
                           <button className="btn btn-ghost btn-sm" onClick={() => duplicate(t)}>Duplicate</button>
                         )}
-                        {editable && canArchive && t.status !== 'archived' && (
-                          <button className="btn btn-ghost btn-sm" onClick={() => archive(t)}>Archive</button>
+                        {rowCanArchive && t.status !== 'archived' && (
+                          <button className="btn btn-ghost btn-sm" onClick={() => (t._sms ? smsToggleActive(t._smsRaw) : archive(t))}>Archive</button>
                         )}
-                        {editable && canArchive && t.status === 'archived' && (
-                          <button className="btn btn-ghost btn-sm" onClick={() => restore(t)}>Restore</button>
+                        {rowCanArchive && t.status === 'archived' && (
+                          <button className="btn btn-ghost btn-sm" onClick={() => (t._sms ? smsToggleActive(t._smsRaw) : restore(t))}>Restore</button>
                         )}
-                        {editable && canDelete && (
-                          <button className="btn btn-ghost btn-sm" title="Delete" onClick={() => remove(t)}><Icon.trash width={13} /></button>
+                        {rowCanDelete && (
+                          <button className="btn btn-ghost btn-sm" title="Delete" onClick={() => (t._sms ? smsRemove(t._smsRaw) : remove(t))}><Icon.trash width={13} /></button>
                         )}
-                        {!editable && <span className="t-sub">Manage under Settings → SMS Templates</span>}
                       </div>
                     </td>
                   </tr>
@@ -140,32 +204,99 @@ export default function Templates() {
       )}
 
       {creating && (
-        <CreateTemplate categories={categories} onClose={() => setCreating(false)}
+        <CreateTemplate categories={categories} onCategoryCreated={addCategory} onClose={() => setCreating(false)}
           onCreated={(t) => { setCreating(false); load(); setEditingId(t.id) }}
+          onCreatedSms={(t) => { setCreating(false); load(); setEditingSms(t) }}
           onError={(m) => toast.err(m)} />
       )}
       {editingId && (
-        <TemplateEditor templateId={editingId} categories={categories} canEdit={canEdit}
+        <TemplateEditor templateId={editingId} categories={categories} onCategoryCreated={addCategory} canEdit={canEdit}
           onClose={() => { setEditingId(null); load() }} toast={toast} />
+      )}
+      {editingSms && (
+        <SmsTemplateEditor initial={editingSms} canEdit={canManageSms}
+          onClose={() => setEditingSms(null)}
+          onSaved={() => { setEditingSms(null); load(); toast.ok('Template saved') }}
+          onError={(m) => toast.err(m)} />
       )}
     </Layout>
   )
 }
 
-function CreateTemplate({ categories, onClose, onCreated, onError }) {
+/** Category <select> with an inline "add new category" affordance -- the
+ * backend has always had POST /template-categories, but nothing in the UI
+ * ever called it, so the dropdown was permanently stuck at "No category"
+ * for anyone who couldn't hit the API directly. */
+function CategoryField({ categories, value, onChange, onCategoryCreated }) {
+  const [adding, setAdding] = useState(false)
   const [name, setName] = useState('')
-  const [channel, setChannel] = useState('email')
-  const [categoryId, setCategoryId] = useState('')
   const [busy, setBusy] = useState(false)
+  const toast = useToast()
+
+  const submit = async () => {
+    if (!name.trim()) return
+    setBusy(true)
+    try {
+      const { data } = await api.post('/template-categories', { name: name.trim() })
+      onCategoryCreated(data)
+      onChange(String(data.id))
+      setAdding(false); setName('')
+    } catch (e) { toast.err(apiError(e)) } finally { setBusy(false) }
+  }
+
+  if (adding) {
+    return (
+      <Field label="Category">
+        <div className="flex gap8">
+          <input className="input" autoFocus placeholder="New category name" value={name}
+            onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submit()} />
+          <button type="button" className="btn btn-ghost btn-sm" onClick={submit} disabled={busy || !name.trim()}>Add</button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setAdding(false); setName('') }}>Cancel</button>
+        </div>
+      </Field>
+    )
+  }
+
+  return (
+    <Field label="Category">
+      <select className="select" value={value}
+        onChange={(e) => (e.target.value === '__new__' ? setAdding(true) : onChange(e.target.value))}>
+        <option value="">No category</option>
+        {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        <option value="__new__">+ Add new category…</option>
+      </select>
+    </Field>
+  )
+}
+
+function CreateTemplate({ categories, onCategoryCreated, onClose, onCreated, onCreatedSms, onError }) {
+  const [channel, setChannel] = useState('email')
+  const [name, setName] = useState('')
+  const [categoryId, setCategoryId] = useState('')
+  const [templateId, setTemplateId] = useState('')
+  const [senderId, setSenderId] = useState('')
+  const [body, setBody] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const canSave = channel === 'sms'
+    ? name.trim() && templateId.trim() && body.trim()
+    : !!name.trim()
 
   const save = async () => {
     setBusy(true)
     try {
-      const payload = { name, channel, category_id: categoryId ? Number(categoryId) : null }
-      if (channel === 'email') payload.email_content = { subject: '', fields: BLANK_TPL_FIELDS }
-      if (channel === 'whatsapp') payload.whatsapp_content = BLANK_WA_CONTENT
-      const { data } = await api.post('/templates', payload)
-      onCreated(data)
+      if (channel === 'sms') {
+        const { data } = await api.post('/sms/templates', {
+          name, template_id: templateId, sender_id: senderId, body, is_active: true,
+        })
+        onCreatedSms(data)
+      } else {
+        const payload = { name, channel, category_id: categoryId ? Number(categoryId) : null }
+        if (channel === 'email') payload.email_content = { subject: '', fields: BLANK_TPL_FIELDS }
+        if (channel === 'whatsapp') payload.whatsapp_content = BLANK_WA_CONTENT
+        const { data } = await api.post('/templates', payload)
+        onCreated(data)
+      }
     } catch (e) { onError(apiError(e)) } finally { setBusy(false) }
   }
 
@@ -173,11 +304,11 @@ function CreateTemplate({ categories, onClose, onCreated, onError }) {
     <Modal title="New template" onClose={onClose}
       footer={<>
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" onClick={save} disabled={busy || !name}>{busy ? 'Creating…' : 'Create'}</button>
+        <button className="btn btn-primary" onClick={save} disabled={busy || !canSave}>{busy ? 'Creating…' : 'Create'}</button>
       </>}>
       <Field label="Channel *">
         <div className="tabs" style={{ marginBottom: 0 }}>
-          {CHANNEL_OPTS.filter((c) => c.key !== 'sms').map((c) => {
+          {CHANNEL_OPTS.map((c) => {
             const Ico = Icon[c.icon]
             return <div key={c.key} className={`tab ${channel === c.key ? 'active' : ''}`} onClick={() => setChannel(c.key)}>
               <span className="flex gap8"><Ico width={14} /> {c.label}</span>
@@ -185,18 +316,116 @@ function CreateTemplate({ categories, onClose, onCreated, onError }) {
           })}
         </div>
       </Field>
-      <Field label="Template name *"><input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Welcome email" autoFocus /></Field>
-      <Field label="Category">
-        <select className="select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-          <option value="">No category</option>
-          {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
+      <Field label="Template name *">
+        <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={NAME_PLACEHOLDER[channel]} autoFocus />
+      </Field>
+      {channel === 'sms' ? (
+        <>
+          <div className="row-2">
+            <Field label="DLT template ID *"><input className="input" value={templateId} onChange={(e) => setTemplateId(e.target.value)} placeholder="1707168726031344535" /></Field>
+            <Field label="Sender ID"><input className="input" value={senderId} onChange={(e) => setSenderId(e.target.value)} placeholder="MISTAE" /></Field>
+          </div>
+          <Field label="Registered template text *" hint="Use {#var#} or {{var}} for variable parts — exactly as approved by the operator.">
+            <textarea className="textarea" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Dear customer, ... {#var#} ..." />
+          </Field>
+        </>
+      ) : (
+        <CategoryField categories={categories} value={categoryId} onChange={setCategoryId} onCategoryCreated={onCategoryCreated} />
+      )}
+    </Modal>
+  )
+}
+
+function SmsTemplateEditor({ initial, canEdit, onClose, onSaved, onError }) {
+  const [f, setF] = useState({
+    name: initial.name, template_id: initial.template_id, sender_id: initial.sender_id,
+    body: initial.body, is_active: initial.is_active,
+  })
+  const [busy, setBusy] = useState(false)
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }))
+
+  const save = async () => {
+    setBusy(true)
+    try { await api.put(`/sms/templates/${initial.id}`, f); onSaved() }
+    catch (e) { onError(apiError(e)) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title="Edit template · SMS" onClose={onClose}
+      footer={<>
+        <button className="btn btn-ghost" onClick={onClose}>Close</button>
+        {canEdit && <button className="btn btn-primary" onClick={save} disabled={busy || !f.name || !f.template_id || !f.body}>{busy ? 'Saving…' : 'Save'}</button>}
+      </>}>
+      <p className="hint">DLT-registered templates must exactly match what's approved by the telecom operator (India DLT) — editing the text here does not re-register it.</p>
+      <div className="row-2">
+        <Field label="Template name *"><input className="input" value={f.name} disabled={!canEdit} onChange={(e) => set('name', e.target.value)} /></Field>
+        <Field label="Sender ID"><input className="input" value={f.sender_id} disabled={!canEdit} onChange={(e) => set('sender_id', e.target.value)} placeholder="MISTAE" /></Field>
+      </div>
+      <Field label="DLT template ID *"><input className="input" value={f.template_id} disabled={!canEdit} onChange={(e) => set('template_id', e.target.value)} /></Field>
+      <Field label="Registered template text *" hint="Use {#var#} or {{var}} for variable parts — exactly as approved by the operator.">
+        <textarea className="textarea" style={{ minHeight: 100 }} value={f.body} disabled={!canEdit} onChange={(e) => set('body', e.target.value)} />
       </Field>
     </Modal>
   )
 }
 
-function TemplateEditor({ templateId, categories, canEdit, onClose, toast }) {
+function TemplateAttachments({ templateId, canEdit, toast }) {
+  const [attachments, setAttachments] = useState([])
+  const [busy, setBusy] = useState(false)
+  const fileRef = useRef()
+
+  const load = () => api.get(`/templates/${templateId}/attachments`).then((r) => setAttachments(r.data)).catch(() => {})
+  useEffect(() => { load() }, [templateId])
+
+  const upload = async (files) => {
+    if (!files || !files.length) return
+    setBusy(true)
+    try {
+      for (const file of files) {
+        const fd = new FormData()
+        fd.append('file', file)
+        await api.post(`/templates/${templateId}/attachments`, fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+      }
+      await load()
+      toast.ok('Attachment(s) uploaded')
+    } catch (e) { toast.err(apiError(e)) } finally { setBusy(false); if (fileRef.current) fileRef.current.value = '' }
+  }
+
+  const remove = async (id) => {
+    const prev = attachments
+    setAttachments((a) => a.filter((x) => x.id !== id))
+    try { await api.delete(`/templates/${templateId}/attachments/${id}`) }
+    catch (e) { setAttachments(prev); toast.err(apiError(e)) }
+  }
+
+  const totalBytes = attachments.reduce((s, a) => s + a.size_bytes, 0)
+
+  return (
+    <Field label="Attachments" hint="Shared by anyone who uses this template · 10MB total">
+      {attachments.length > 0 && (
+        <div className="wrap-gap" style={{ marginBottom: 10 }}>
+          {attachments.map((a) => (
+            <span key={a.id} className="ph-chip" style={{ cursor: 'default', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <Icon.paperclip width={12} /> {a.filename} <span className="muted">({fmtSize(a.size_bytes)})</span>
+              {canEdit && <span onClick={() => remove(a.id)} title="Remove attachment" style={{ cursor: 'pointer', marginLeft: 2, fontWeight: 700 }}>&times;</span>}
+            </span>
+          ))}
+        </div>
+      )}
+      {canEdit && (
+        <div className="flex gap8" style={{ alignItems: 'center' }}>
+          <input ref={fileRef} type="file" multiple style={{ display: 'none' }} onChange={(e) => upload(e.target.files)} />
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => fileRef.current.click()}>
+            {busy ? 'Uploading…' : <><Icon.paperclip width={14} /> Add attachment</>}
+          </button>
+          {attachments.length > 0 && <span className="t-sub">{fmtSize(totalBytes)} used</span>}
+        </div>
+      )}
+    </Field>
+  )
+}
+
+function TemplateEditor({ templateId, categories, onCategoryCreated, canEdit, onClose, toast }) {
   const [tpl, setTpl] = useState(null)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -267,12 +496,7 @@ function TemplateEditor({ templateId, categories, canEdit, onClose, toast }) {
         <div>
           <div className="row-2">
             <Field label="Name *"><input className="input" value={name} disabled={!canEdit} onChange={(e) => setName(e.target.value)} /></Field>
-            <Field label="Category">
-              <select className="select" value={categoryId} disabled={!canEdit} onChange={(e) => setCategoryId(e.target.value)}>
-                <option value="">No category</option>
-                {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-            </Field>
+            <CategoryField categories={categories} value={categoryId} onChange={setCategoryId} onCategoryCreated={onCategoryCreated} />
           </div>
           <Field label="Description"><textarea className="textarea" value={description} disabled={!canEdit} onChange={(e) => setDescription(e.target.value)} /></Field>
 
@@ -282,6 +506,7 @@ function TemplateEditor({ templateId, categories, canEdit, onClose, toast }) {
                 <input className="input" value={subject} disabled={!canEdit} onChange={(e) => setSubject(e.target.value)}
                   placeholder="Hi {{Name}}, an update from {{Company}}" />
               </Field>
+              <TemplateAttachments templateId={templateId} canEdit={canEdit} toast={toast} />
               <TemplateFieldsForm project={previewProject} tf={tf} getTplValue={getTplValue} setTplField={setTplField}
                 tplRefs={tplRefs} tplFocused={tplFocused} canEdit={canEdit} />
             </>

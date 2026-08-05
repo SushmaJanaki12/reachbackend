@@ -1,29 +1,29 @@
 from types import SimpleNamespace
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import (
-    Template, TemplateCategory, EmailTemplateContent, WhatsappTemplateContent,
-    CampaignContent, Project, Recipient, User,
+    Template, TemplateCategory, EmailTemplateContent, WhatsappTemplateContent, TemplateAttachment,
+    Project, Recipient, User,
 )
 from ..schemas import (
     TemplateOut, TemplateCreate, TemplateUpdate,
     TemplateCategoryIn, TemplateCategoryOut,
-    TemplateLibraryPreviewIn, TemplatePreviewOut,
+    TemplateLibraryPreviewIn, TemplatePreviewOut, TemplateAttachmentOut,
 )
 from ..deps import require, user_permissions
 from ..email_template import render_email_template
+from ..storage import save_campaign_attachment, delete_campaign_attachment
 
 router = APIRouter(prefix="/api", tags=["templates"])
 
-CHANNELS = ("email", "whatsapp", "sms")
-# SMS templates are still authored/managed via the existing DLT-template
-# endpoints in routers/sms.py (matches_template() validation on the send
-# path depends on that flow staying as-is) -- this router only lists them
-# alongside Email/WhatsApp for a unified library view (see backfill in
-# migration a1c4e9f27b53).
+# SMS templates are DLT-registered (India telecom compliance) and have no
+# draft/published/archived lifecycle or per-project branding -- they stay in
+# their own table (SmsTemplate, managed via /api/sms/templates) rather than
+# living in this umbrella table. The Templates page merges both sources
+# client-side into one list.
 CREATABLE_CHANNELS = ("email", "whatsapp")
 
 
@@ -124,11 +124,7 @@ def list_templates(channel: str | None = None, category_id: int | None = None, s
 def create_template(payload: TemplateCreate, db: Session = Depends(get_db),
                     user: User = Depends(require("template.edit"))):
     if payload.channel not in CREATABLE_CHANNELS:
-        raise HTTPException(
-            status_code=400,
-            detail="SMS templates are managed under SMS DLT Templates" if payload.channel == "sms"
-            else "Invalid channel",
-        )
+        raise HTTPException(status_code=400, detail="Invalid channel")
     if payload.channel == "whatsapp" and payload.whatsapp_content is None:
         raise HTTPException(status_code=400, detail="whatsapp_content is required for a WhatsApp template")
     template = Template(
@@ -214,12 +210,8 @@ def archive_template(template_id: int, db: Session = Depends(get_db),
 def delete_template(template_id: int, db: Session = Depends(get_db),
                     _: User = Depends(require("template.delete"))):
     template = _get_template(db, template_id)
-    in_use = db.query(CampaignContent).filter_by(source_template_id=template.id).first()
-    if in_use:
-        raise HTTPException(
-            status_code=409,
-            detail="This template has been used in a campaign and can't be deleted -- archive it instead",
-        )
+    for att in template.attachments:
+        delete_campaign_attachment(att.storage_path)
     db.delete(template)
     db.commit()
     return {"ok": True}
@@ -229,8 +221,6 @@ def delete_template(template_id: int, db: Session = Depends(get_db),
 def preview_template(template_id: int, payload: TemplateLibraryPreviewIn, db: Session = Depends(get_db),
                      user: User = Depends(require("template.view"))):
     template = _get_template(db, template_id)
-    if template.channel == "sms":
-        raise HTTPException(status_code=400, detail="Use the SMS DLT template validation endpoints instead")
 
     recipient = None
     if payload.recipient_id:
@@ -261,3 +251,41 @@ def preview_template(template_id: int, payload: TemplateLibraryPreviewIn, db: Se
     if content.footer_text:
         parts.append(f"<div style='color:#888;font-size:0.85em'>{_html.escape(content.footer_text)}</div>")
     return TemplatePreviewOut(html="".join(parts), missing=[])
+
+
+# ---------- attachments (email templates only) ----------
+@router.get("/templates/{template_id}/attachments", response_model=list[TemplateAttachmentOut])
+def list_attachments(template_id: int, db: Session = Depends(get_db), _: User = Depends(require("template.view"))):
+    template = _get_template(db, template_id)
+    return template.attachments
+
+
+@router.post("/templates/{template_id}/attachments", response_model=TemplateAttachmentOut)
+async def upload_attachment(template_id: int, file: UploadFile = File(...), db: Session = Depends(get_db),
+                            _: User = Depends(require("template.edit"))):
+    template = _get_template(db, template_id)
+    if template.channel != "email":
+        raise HTTPException(status_code=400, detail="Attachments are only supported on Email templates")
+    existing_total = sum(a.size_bytes for a in template.attachments)
+    storage_path, size_bytes, content_type = await save_campaign_attachment(file, existing_total)
+    att = TemplateAttachment(
+        template_id=template.id, filename=file.filename or "attachment",
+        content_type=content_type, storage_path=storage_path, size_bytes=size_bytes,
+    )
+    db.add(att)
+    db.commit()
+    db.refresh(att)
+    return att
+
+
+@router.delete("/templates/{template_id}/attachments/{attachment_id}")
+def remove_attachment(template_id: int, attachment_id: int, db: Session = Depends(get_db),
+                      _: User = Depends(require("template.edit"))):
+    template = _get_template(db, template_id)
+    att = db.get(TemplateAttachment, attachment_id)
+    if not att or att.template_id != template.id:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    delete_campaign_attachment(att.storage_path)
+    db.delete(att)
+    db.commit()
+    return {"ok": True}

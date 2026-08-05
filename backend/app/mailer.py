@@ -105,8 +105,7 @@ def send_email(to_email: str, subject: str, body: str, from_email: str | None = 
                 attachments: list[Attachment] | None = None) -> str:
     """Send a single email. Returns the Graph provider request id. Raises MailError on failure.
 
-    `is_html` must only be set for the branded-template content mode, where
-    `body` is already-rendered, pre-escaped HTML from app/email_template.py --
+    `is_html`, if set, means `body` is already-rendered, pre-escaped HTML;
     every other caller sends plain text, which is still escaped and wrapped
     into HTML here as before.
 

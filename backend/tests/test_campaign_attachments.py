@@ -1,5 +1,5 @@
 import app.worker as worker_mod
-from tests.conftest import make_campaign, drain_queue
+from tests.conftest import make_campaign, drain_queue, upload_dataset
 
 CSV = "Name,Email Address,Mobile Number\nAlice,alice@example.com,9876543210\n"
 
@@ -83,8 +83,7 @@ def test_uploaded_attachment_reaches_send_campaign_email_at_send_time(client, ad
     worker wires the stored attachment bytes into that call in the first
     place."""
     c = make_campaign(client, admin_headers, project["id"])
-    client.post(f"/api/campaigns/{c['id']}/dataset", headers=admin_headers,
-               files={"file": ("data.csv", CSV, "text/csv")})
+    upload_dataset(client, admin_headers, c['id'], CSV)
     client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers,
               json={"subject": "Hi {{Name}}", "body": "Hello {{Name}}"})
     client.put(f"/api/campaigns/{c['id']}", headers=admin_headers, json={"email_enabled": True})
@@ -121,8 +120,7 @@ def test_no_attachments_passes_none_not_empty_list(client, admin_headers, projec
     attachments must not regress to sending an empty attachments list (which
     would still build empty MIME parts / Graph payload entries)."""
     c = make_campaign(client, admin_headers, project["id"])
-    client.post(f"/api/campaigns/{c['id']}/dataset", headers=admin_headers,
-               files={"file": ("data.csv", CSV, "text/csv")})
+    upload_dataset(client, admin_headers, c['id'], CSV)
     client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers,
               json={"subject": "Hi {{Name}}", "body": "Hello {{Name}}"})
     client.put(f"/api/campaigns/{c['id']}", headers=admin_headers, json={"email_enabled": True})
