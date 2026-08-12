@@ -1,3 +1,5 @@
+from app.database import SessionLocal
+from app.models import Message, MessageHistory
 from tests.conftest import make_campaign, drain_queue, _token
 
 # Clean fixture used by the shared `_upload()` helper -- tests that only care
@@ -314,7 +316,7 @@ def test_send_without_recipients_fails(client, admin_headers, project):
     assert r.status_code == 400
 
 
-def test_send_while_sending_rejected_but_resend_after_completion_allowed(client, admin_headers, project):
+def test_send_while_sending_rejected(client, admin_headers, project):
     c = make_campaign(client, admin_headers, project["id"])
     _upload(client, admin_headers, c["id"])
     client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers, json={"body": "Hello {{Name}}"})
@@ -333,14 +335,105 @@ def test_send_while_sending_rejected_but_resend_after_completion_allowed(client,
     completed = client.get(f"/api/campaigns/{c['id']}", headers=admin_headers).json()
     assert completed["status"] == "completed"
 
-    # Once fully completed, sending again (e.g. a deliberate follow-up blast
-    # to the same dataset) is allowed -- no permanent "already sent" lock.
-    resend_after_complete = client.post(f"/api/campaigns/{c['id']}/send", headers=admin_headers)
-    assert resend_after_complete.status_code == 200
-    assert resend_after_complete.json()["status"] == "sending"
+
+def test_resend_after_completion_archives_prior_run_and_starts_fresh(client, admin_headers, project):
+    """P0.5, revised 2026-08-11: resend used to be blocked outright once a
+    campaign had any Message rows (an earlier revision of this same fix --
+    see git history). Resend is now allowed repeatedly: the prior run's
+    Message rows are archived into MessageHistory (see
+    app/campaign_resend.py) rather than destroyed, and the live `messages`
+    table starts clean for the new run."""
+    c = make_campaign(client, admin_headers, project["id"])
+    _upload(client, admin_headers, c["id"])  # 3 recipients (Alice, Bob, Carol)
+    client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers, json={"body": "Hello {{Name}}"})
+    client.put(f"/api/campaigns/{c['id']}", headers=admin_headers, json={"email_enabled": True})
+
+    first = client.post(f"/api/campaigns/{c['id']}/send", headers=admin_headers)
+    assert first.status_code == 200
     drain_queue()
-    resent = client.get(f"/api/campaigns/{c['id']}", headers=admin_headers).json()
-    assert resent["status"] == "completed"
+    first_recipients = client.get(f"/api/campaigns/{c['id']}/recipients", headers=admin_headers).json()
+
+    db = SessionLocal()
+    try:
+        first_run_ids = {m.id for m in db.query(Message).filter_by(campaign_id=c["id"]).all()}
+        assert len(first_run_ids) == 3
+    finally:
+        db.close()
+
+    resend = client.post(f"/api/campaigns/{c['id']}/send", headers=admin_headers)
+    assert resend.status_code == 200, resend.text
+    assert resend.json()["status"] == "sending"
+    drain_queue()
+
+    # Recipients (and the campaign itself) are untouched by a resend.
+    after_recipients = client.get(f"/api/campaigns/{c['id']}/recipients", headers=admin_headers).json()
+    assert first_recipients == after_recipients
+
+    db = SessionLocal()
+    try:
+        # Prior run's rows archived intact, not deleted.
+        archived = db.query(MessageHistory).filter_by(campaign_id=c["id"], sent_run_number=1).all()
+        assert len(archived) == 3
+        assert {a.to_address for a in archived} == {r["email"] for r in first_recipients}
+        assert all(a.status == "sent" for a in archived)
+
+        # Live table now holds only the new run -- different Message rows,
+        # tagged with the new run number, none of the old ids reused.
+        live = db.query(Message).filter_by(campaign_id=c["id"]).all()
+        assert len(live) == 3
+        assert {m.sent_run_number for m in live} == {2}
+        assert {m.id for m in live}.isdisjoint(first_run_ids)
+    finally:
+        db.close()
+
+    # Both runs are independently visible via the run-scoped tracking API.
+    run1_rows = client.get(f"/api/campaigns/{c['id']}/tracking/email",
+                            headers=admin_headers, params={"run": 1}).json()
+    assert len(run1_rows) == 3
+    current_rows = client.get(f"/api/campaigns/{c['id']}/tracking/email", headers=admin_headers).json()
+    assert len(current_rows) == 3
+    assert {r["id"] for r in run1_rows}.isdisjoint({r["id"] for r in current_rows})
+
+    runs = client.get(f"/api/campaigns/{c['id']}/send-runs", headers=admin_headers).json()
+    assert [r["run_number"] for r in runs] == [1, 2]
+    assert runs[1]["is_current"] is True and runs[0]["is_current"] is False
+    assert runs[0]["message_count"] == 3 and runs[1]["message_count"] == 3
+
+
+def test_duplicate_campaign_is_clean_draft_sendable_again(client, admin_headers, project):
+    c = make_campaign(client, admin_headers, project["id"], name="Original")
+    _upload(client, admin_headers, c["id"])
+    client.put(f"/api/campaigns/{c['id']}/content/email", headers=admin_headers,
+               json={"subject": "Hi {{Name}}", "body": "Hello {{Name}}"})
+    client.put(f"/api/campaigns/{c['id']}", headers=admin_headers, json={"email_enabled": True})
+
+    send = client.post(f"/api/campaigns/{c['id']}/send", headers=admin_headers)
+    assert send.status_code == 200
+    drain_queue()
+    completed = client.get(f"/api/campaigns/{c['id']}", headers=admin_headers).json()
+    assert completed["status"] == "completed"
+
+    dup = client.post(f"/api/campaigns/{c['id']}/duplicate", headers=admin_headers)
+    assert dup.status_code == 200, dup.text
+    clone = dup.json()
+    assert clone["id"] != c["id"]
+    assert clone["status"] == "draft"
+    assert clone["name"] == "Original (copy)"
+    assert clone["email_enabled"] is True
+    # Config carried over, but not recipients or Message history.
+    assert clone["recipient_count"] == 0
+
+    clone_contents = client.get(f"/api/campaigns/{clone['id']}/content", headers=admin_headers).json()
+    email_content = next(c for c in clone_contents if c["channel"] == "email")
+    assert email_content["subject"] == "Hi {{Name}}"
+    assert email_content["body"] == "Hello {{Name}}"
+
+    # The clone has no messages yet and is entirely independent of the
+    # source campaign's own Message history (unlike resending the source
+    # in place, which archives and replaces it -- see test_campaign_resend.py).
+    _upload(client, admin_headers, clone["id"])
+    clone_send = client.post(f"/api/campaigns/{clone['id']}/send", headers=admin_headers)
+    assert clone_send.status_code == 200, clone_send.text
 
 
 def test_preview_rejects_recipient_from_another_campaign(client, admin_headers, project):

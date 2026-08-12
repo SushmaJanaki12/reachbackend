@@ -63,3 +63,21 @@ def test_dashboard_scoped_for_user(client, user_headers):
     r = client.get("/api/dashboard/overview", headers=user_headers)
     assert r.status_code == 200
     assert "totals" in r.json()
+
+
+def test_dashboard_excludes_test_campaigns(client, admin_headers, project):
+    """P1.5 gap check: a test campaign's fabricated (Simulate-driven) data
+    must never inflate the cross-campaign analytics on this dashboard --
+    verifies the exclusion routers/dashboard.py already applies
+    (Campaign.is_test_campaign.is_(False)), which had no direct test."""
+    before = client.get("/api/dashboard/overview", headers=admin_headers).json()["totals"]["campaigns"]
+
+    client.post("/api/campaigns", headers=admin_headers,
+                json={"project_id": project["id"], "name": "Test Camp", "is_test_campaign": True})
+    after_test = client.get("/api/dashboard/overview", headers=admin_headers).json()["totals"]["campaigns"]
+    assert after_test == before  # test campaign not counted
+
+    client.post("/api/campaigns", headers=admin_headers,
+                json={"project_id": project["id"], "name": "Real Camp", "is_test_campaign": False})
+    after_real = client.get("/api/dashboard/overview", headers=admin_headers).json()["totals"]["campaigns"]
+    assert after_real == before + 1  # real campaign counted

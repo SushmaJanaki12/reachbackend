@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..models import (
-    Campaign, Project, Recipient, CampaignContent, CampaignAttachment, Message, User,
-    DatasetValidationSession, ValidationOverrideLog,
+    Campaign, CampaignFollowUpSettings, Project, Recipient, CampaignContent, CampaignAttachment, FollowUpStep,
+    Message, User, DatasetValidationSession, ValidationOverrideLog,
 )
 from ..schemas import (
     CampaignOut, CampaignCreate, CampaignUpdate, ContentIn, ContentOut,
@@ -21,10 +21,12 @@ from ..schemas import (
     ContentGenerateIn, ContentGenerateOut,
 )
 from ..deps import require, get_current_user, user_permissions
+from ..campaign_resend import archive_campaign_history
 from ..campaign_utils import (
     render_template as _render, valid_email as _valid_email, valid_mobile as _valid_mobile,
 )
-from ..storage import save_campaign_attachment, delete_campaign_attachment
+from ..pagination import Pagination, paginate
+from ..storage import save_campaign_attachment, delete_campaign_attachment, duplicate_campaign_attachment
 from ..worker import enqueue_message
 from .. import dataset_validation as dv
 from ..dataset_validation import parsing as dv_parsing, fixes as dv_fixes, report as dv_report
@@ -91,7 +93,8 @@ def _to_out(campaign: Campaign) -> CampaignOut:
 
 # ---------- campaign CRUD ----------
 @router.get("/campaigns", response_model=list[CampaignOut])
-def list_all_campaigns(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def list_all_campaigns(response: Response, pagination: Pagination = Depends(),
+                        db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """All campaigns across the projects the user can see."""
     perms = user_permissions(user)
     see_all = "user.manage" in perms or "system.configure" in perms
@@ -100,16 +103,18 @@ def list_all_campaigns(db: Session = Depends(get_db), user: User = Depends(get_c
     else:
         pids = [p.id for p in user.projects]
     if not pids:
+        response.headers["X-Total-Count"] = "0"
         return []
-    campaigns = db.query(Campaign).filter(Campaign.project_id.in_(pids)).order_by(Campaign.id.desc()).all()
-    return [_to_out(c) for c in campaigns]
+    query = db.query(Campaign).filter(Campaign.project_id.in_(pids)).order_by(Campaign.id.desc())
+    return [_to_out(c) for c in paginate(query, pagination, response)]
 
 
 @router.get("/projects/{project_id}/campaigns", response_model=list[CampaignOut])
-def list_campaigns(project_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def list_campaigns(project_id: int, response: Response, pagination: Pagination = Depends(),
+                    db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _accessible_project(db, project_id, user)
-    campaigns = db.query(Campaign).filter_by(project_id=project_id).order_by(Campaign.id.desc()).all()
-    return [_to_out(c) for c in campaigns]
+    query = db.query(Campaign).filter_by(project_id=project_id).order_by(Campaign.id.desc())
+    return [_to_out(c) for c in paginate(query, pagination, response)]
 
 
 @router.get("/campaigns/{campaign_id}", response_model=CampaignOut)
@@ -122,11 +127,61 @@ def create_campaign(payload: CampaignCreate, db: Session = Depends(get_db),
                     user: User = Depends(require("campaign.create"))):
     _accessible_project(db, payload.project_id, user)
     campaign = Campaign(project_id=payload.project_id, name=payload.name,
-                        description=payload.description, created_by=user.id)
+                        description=payload.description, is_test_campaign=payload.is_test_campaign,
+                        created_by=user.id)
     db.add(campaign)
     db.commit()
     db.refresh(campaign)
     return _to_out(campaign)
+
+
+@router.post("/campaigns/{campaign_id}/duplicate", response_model=CampaignOut)
+def duplicate_campaign(campaign_id: int, db: Session = Depends(get_db),
+                        user: User = Depends(require("campaign.create"))):
+    """Clones a campaign's config into a fresh draft -- content, attachments,
+    follow-up steps and settings -- but never its recipients or Message
+    history. An alternative to resending the source campaign in place (see
+    send_campaign): resend archives and replaces the source's own history on
+    the same campaign record, while duplicating leaves the source untouched
+    and starts a brand-new campaign with zero messages instead."""
+    source = _get_campaign(db, campaign_id, user)
+    clone = Campaign(
+        project_id=source.project_id, name=f"{source.name} (copy)", description=source.description,
+        email_enabled=source.email_enabled, whatsapp_enabled=source.whatsapp_enabled,
+        sms_enabled=source.sms_enabled, is_test_campaign=source.is_test_campaign,
+        sms_template_ref=source.sms_template_ref, created_by=user.id,
+    )
+    db.add(clone)
+    db.flush()
+
+    for content in source.contents:
+        db.add(CampaignContent(campaign_id=clone.id, channel=content.channel,
+                                subject=content.subject, body=content.body))
+
+    for att in source.attachments:
+        new_path, size_bytes = duplicate_campaign_attachment(att.storage_path)
+        db.add(CampaignAttachment(campaign_id=clone.id, filename=att.filename,
+                                   content_type=att.content_type, storage_path=new_path, size_bytes=size_bytes))
+
+    for step in source.followup_steps:
+        db.add(FollowUpStep(
+            campaign_id=clone.id, step_order=step.step_order, trigger_type=step.trigger_type,
+            delay_value=step.delay_value, delay_unit=step.delay_unit, send_time=step.send_time,
+            primary_channel=step.primary_channel, fallback_channel=step.fallback_channel,
+            subject=step.subject, body_template=step.body_template,
+        ))
+
+    if source.followup_settings:
+        s = source.followup_settings
+        db.add(CampaignFollowUpSettings(
+            campaign_id=clone.id, max_touches_per_week=s.max_touches_per_week,
+            skip_weekends=s.skip_weekends, negative_reply_handling=s.negative_reply_handling,
+            default_send_time=s.default_send_time,
+        ))
+
+    db.commit()
+    db.refresh(clone)
+    return _to_out(clone)
 
 
 @router.put("/campaigns/{campaign_id}", response_model=CampaignOut)
@@ -366,9 +421,11 @@ def delete_dataset(campaign_id: int, db: Session = Depends(get_db), user: User =
 
 
 @router.get("/campaigns/{campaign_id}/recipients", response_model=list[RecipientOut])
-def list_recipients(campaign_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def list_recipients(campaign_id: int, response: Response, pagination: Pagination = Depends(),
+                     db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     campaign = _get_campaign(db, campaign_id, user)
-    return campaign.recipients
+    query = db.query(Recipient).filter_by(campaign_id=campaign.id).order_by(Recipient.id)
+    return paginate(query, pagination, response)
 
 
 def _recipient_data(campaign: Campaign, name: str, email: str, mobile: str) -> dict:
@@ -549,9 +606,25 @@ def send_campaign(campaign_id: int, db: Session = Depends(get_db), user: User = 
 
     if campaign.status == "sending":
         raise HTTPException(status_code=409, detail="Campaign is currently sending, please wait")
-    # A "completed" campaign is deliberately re-sendable -- e.g. a follow-up
-    # blast to the same dataset. The "clear previous run" step below replaces
-    # last run's Message rows, so tracking always reflects only the latest send.
+    if db.query(Message).filter_by(campaign_id=campaign.id).first() is not None:
+        # Resending in place used to hard-delete every prior Message row on
+        # every send, permanently destroying that recipient's open/click/reply
+        # history -- and an earlier revision of this fix blocked resend
+        # outright instead (forcing Duplicate). P0.5, revised 2026-08-11:
+        # resend is now allowed repeatedly -- archive the prior run's
+        # Message/FollowUpRun rows into their -History tables first (see
+        # app/campaign_resend.py) so nothing already recorded is lost, then
+        # fall through to the normal send logic below to start a fresh run.
+        try:
+            archive_campaign_history(db, campaign)
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "campaign %s: failed to archive prior send history, resend aborted", campaign.id)
+            raise HTTPException(
+                status_code=500,
+                detail="Could not archive this campaign's prior send history; resend aborted, nothing was lost.",
+            )
 
     active_recipients = [r for r in campaign.recipients if r.active]
     if not active_recipients:
@@ -572,10 +645,6 @@ def send_campaign(campaign_id: int, db: Session = Depends(get_db), user: User = 
         if ch not in content_map:
             raise HTTPException(status_code=400, detail=f"No content authored for channel: {ch}")
 
-    # clear previous run
-    db.query(Message).filter_by(campaign_id=campaign.id).delete()
-    db.commit()
-
     queued_ids = []
     for rec in active_recipients:
         for ch in channels:
@@ -583,7 +652,7 @@ def send_campaign(campaign_id: int, db: Session = Depends(get_db), user: User = 
             valid = _valid_email(to) if ch == "email" else _valid_mobile(to)
             msg = Message(
                 campaign_id=campaign.id, recipient_id=rec.id, channel=ch,
-                to_address=to, recipient_name=rec.name,
+                to_address=to, recipient_name=rec.name, sent_run_number=campaign.current_send_run,
             )
             if not valid:
                 msg.status = "failed"
@@ -598,6 +667,7 @@ def send_campaign(campaign_id: int, db: Session = Depends(get_db), user: User = 
                 queued_ids.append(msg.id)
 
     campaign.status = "sending"
+    campaign.sending_since = datetime.now(timezone.utc)
     db.commit()
     db.refresh(campaign)
 

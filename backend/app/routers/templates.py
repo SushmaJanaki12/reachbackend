@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -8,6 +8,7 @@ from ..models import (
     Template, TemplateCategory, EmailTemplateContent, WhatsappTemplateContent, TemplateAttachment,
     Project, Recipient, User,
 )
+from ..pagination import Pagination, paginate
 from ..schemas import (
     TemplateOut, TemplateCreate, TemplateUpdate,
     TemplateCategoryIn, TemplateCategoryOut,
@@ -105,9 +106,9 @@ def create_category(payload: TemplateCategoryIn, db: Session = Depends(get_db),
 
 # ---------- templates ----------
 @router.get("/templates", response_model=list[TemplateOut])
-def list_templates(channel: str | None = None, category_id: int | None = None, status: str | None = None,
-                   q: str | None = None, db: Session = Depends(get_db),
-                   _: User = Depends(require("template.view"))):
+def list_templates(response: Response, channel: str | None = None, category_id: int | None = None,
+                   status: str | None = None, q: str | None = None, pagination: Pagination = Depends(),
+                   db: Session = Depends(get_db), _: User = Depends(require("template.view"))):
     query = db.query(Template)
     if channel:
         query = query.filter(Template.channel == channel)
@@ -117,7 +118,8 @@ def list_templates(channel: str | None = None, category_id: int | None = None, s
         query = query.filter(Template.status == status)
     if q:
         query = query.filter(Template.name.ilike(f"%{q}%"))
-    return query.order_by(Template.updated_at.desc()).all()
+    query = query.order_by(Template.updated_at.desc())
+    return paginate(query, pagination, response)
 
 
 @router.post("/templates", response_model=TemplateOut)

@@ -2,7 +2,15 @@ import { useEffect, useRef, useState } from 'react'
 import Layout from '../components/Layout'
 import { useAuth } from '../auth'
 import api, { apiError } from '../api'
-import { Icon, Modal, Field, StatusBadge, Spinner, useToast } from '../components/ui'
+import { Icon, Modal, Field, StatusBadge, Spinner, Pager, useToast } from '../components/ui'
+
+// /templates now returns one page at a time (see app/pagination.py) --
+// this page merges it with the always-fetched-in-full /sms/templates list
+// (a separate, DLT-bounded table with no pagination of its own) and
+// client-sorts the combination, so true page-through UI isn't a clean fit
+// here. Requesting the max page size covers realistic library sizes
+// without a regression; TEMPLATES_PAGE_SIZE below only kicks in past that.
+const TEMPLATES_PAGE_SIZE = 100
 import { BLANK_TPL_FIELDS, TemplateFieldsForm, useTplFieldAccessors } from '../components/TemplateFieldsForm'
 
 const CHANNEL_OPTS = [
@@ -47,6 +55,8 @@ export default function Templates() {
   const [channel, setChannel] = useState('all')
   const [status, setStatus] = useState('all')
   const [q, setQ] = useState('')
+  const [page, setPage] = useState(1)
+  const [templatesTotal, setTemplatesTotal] = useState(0)
   const [creating, setCreating] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editingSms, setEditingSms] = useState(null)
@@ -62,8 +72,10 @@ export default function Templates() {
             ...(channel !== 'all' ? { channel } : {}),
             ...(status !== 'all' ? { status } : {}),
             ...(q ? { q } : {}),
+            page, page_size: TEMPLATES_PAGE_SIZE,
           },
-        }).then((r) => r.data).catch(() => [])
+        }).then((r) => { setTemplatesTotal(Number(r.headers['x-total-count']) || r.data.length); return r.data })
+          .catch(() => [])
       : Promise.resolve([])
 
     const smsReq = wantSms
@@ -84,7 +96,8 @@ export default function Templates() {
       setItems(merged)
     })
   }
-  useEffect(() => { load() }, [channel, status, q])
+  useEffect(() => { load() }, [channel, status, q, page])
+  useEffect(() => { setPage(1) }, [channel, status, q])
   useEffect(() => { api.get('/template-categories').then((r) => setCategories(r.data)).catch(() => {}) }, [])
 
   const addCategory = (cat) => setCategories((c) => [...c, cat].sort((a, b) => a.name.localeCompare(b.name)))
@@ -201,6 +214,9 @@ export default function Templates() {
             </tbody>
           </table>
         </div>
+      )}
+      {templatesTotal > TEMPLATES_PAGE_SIZE && (
+        <Pager page={page} pageSize={TEMPLATES_PAGE_SIZE} total={templatesTotal} onPage={setPage} />
       )}
 
       {creating && (

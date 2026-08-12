@@ -14,6 +14,16 @@ class Token(BaseModel):
     token_type: str = "bearer"
 
 
+# ---------- forgot / reset password (P1.7) ----------
+class ForgotPasswordIn(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordIn(BaseModel):
+    token: str
+    new_password: str
+
+
 # ---------- permissions / roles ----------
 class PermissionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -233,11 +243,44 @@ class SendTestEmailIn(BaseModel):
     to: EmailStr
 
 
+# ---------- reply capture (P1.3) ----------
+class ReplyCaptureSettingsUpdate(BaseModel):
+    enabled: bool | None = None
+    mailbox_address: str | None = None
+    imap_host: str | None = None
+    imap_port: int | None = None
+    imap_use_ssl: bool | None = None
+    imap_username: str | None = None
+    imap_password: str | None = None
+    poll_folder: str | None = None
+    poll_interval_seconds: int | None = None
+
+
+class ReplyCaptureSettingsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    enabled: bool
+    mailbox_address: str
+    imap_host: str
+    imap_port: int
+    imap_use_ssl: bool
+    imap_username: str
+    has_password: bool = False  # imap_password itself is never returned
+    poll_folder: str
+    poll_interval_seconds: int
+    last_polled_at: datetime | None = None
+    last_poll_status: str = "never"
+    last_poll_error: str = ""
+    updated_at: datetime | None = None
+
+
 # ---------- campaigns ----------
 class CampaignCreate(BaseModel):
     project_id: int
     name: str
     description: str = ""
+    # Immutable after creation -- see Campaign.is_test_campaign in models.py.
+    is_test_campaign: bool = False
 
 
 class CampaignUpdate(BaseModel):
@@ -311,6 +354,7 @@ class CampaignOut(BaseModel):
     whatsapp_enabled: bool
     sms_enabled: bool
     sms_template_ref: int | None = None
+    is_test_campaign: bool = False
     created_at: datetime | None = None
     recipient_count: int = 0
     columns: list[str] = []
@@ -517,6 +561,12 @@ class MessageOut(BaseModel):
     sent_at: datetime | None = None
     delivered_at: datetime | None = None
     read_at: datetime | None = None
+    step_id: int | None = None
+    opened_at: datetime | None = None
+    clicked_at: datetime | None = None
+    replied_at: datetime | None = None
+    reply_sentiment: str | None = None
+    engagement_source: str | None = None
 
 
 class SummaryOut(BaseModel):
@@ -530,6 +580,78 @@ class SummaryOut(BaseModel):
     pending: int
     suppressed: int
     status: str
+
+
+class SendRunOut(BaseModel):
+    # One entry per distinct send of a campaign (P0.5: resend archives the
+    # prior run rather than overwriting it) -- backs the run selector on
+    # Tracking & Reports (?run= on /tracking/{channel} and /summary).
+    run_number: int
+    is_current: bool
+    message_count: int
+    first_sent_at: datetime | None = None
+
+
+# ---------- follow-ups ----------
+class FollowUpStepStats(BaseModel):
+    sent: int = 0
+    open_rate: float | None = None
+    click_rate: float | None = None
+    reply_rate: float | None = None
+
+
+class FollowUpStepIn(BaseModel):
+    trigger_type: Literal["no_reply", "not_opened", "not_clicked"] = "no_reply"
+    delay_value: int = 3
+    delay_unit: Literal["hours", "days"] = "days"
+    send_time: str | None = None
+    primary_channel: Literal["email", "whatsapp", "sms"] = "email"
+    fallback_channel: Literal["email", "whatsapp", "sms"] | None = None
+    subject: str = ""
+    body_template: str = ""
+
+
+class FollowUpStepOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    campaign_id: int
+    step_order: int
+    trigger_type: str
+    delay_value: int
+    delay_unit: str
+    send_time: str | None = None
+    primary_channel: str
+    fallback_channel: str | None = None
+    subject: str
+    body_template: str
+    stats: FollowUpStepStats = FollowUpStepStats()
+
+
+class CampaignFollowUpSettingsIn(BaseModel):
+    max_touches_per_week: int = 3
+    skip_weekends: bool = True
+    negative_reply_handling: Literal["stop_only", "tag_and_stop"] = "tag_and_stop"
+    default_send_time: str | None = None
+    restart_on_resend: bool = False
+
+
+class CampaignFollowUpSettingsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    campaign_id: int
+    max_touches_per_week: int
+    skip_weekends: bool
+    negative_reply_handling: str
+    default_send_time: str | None = None
+    restart_on_resend: bool = False
+
+
+class SimulateEventIn(BaseModel):
+    event: Literal["opened", "clicked", "replied"]
+    reply_text: str | None = None
+
+
+class FollowUpStepMoveIn(BaseModel):
+    direction: Literal["up", "down"]
 
 
 # ---------- dataset validation (AI Smart Data Validation) ----------

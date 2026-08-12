@@ -1,9 +1,10 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import app.worker as worker_mod
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Message
+from app.models import Campaign, Message
 from tests.conftest import make_campaign, drain_queue, upload_dataset
 
 CSV = (
@@ -34,7 +35,8 @@ def _configure_real_email(monkeypatch):
     monkeypatch.setattr(s, "o365_from_email", "from@acme.com")
     calls = []
     monkeypatch.setattr(worker_mod, "send_campaign_email",
-                        lambda project, to, subject, body, is_html=False, attachments=None: (calls.append(to), "provider-id")[1])
+                        lambda project, to, subject, body, is_html=False, attachments=None, reply_to=None:
+                            (calls.append(to), "provider-id")[1])
     return calls
 
 
@@ -127,7 +129,8 @@ def test_rate_limiting_throttles_sends(client, admin_headers, project, monkeypat
 
     calls = []
     monkeypatch.setattr(worker_mod, "send_campaign_email",
-                        lambda project, to, subject, body, is_html=False, attachments=None: (calls.append(to), "provider-id")[1])
+                        lambda project, to, subject, body, is_html=False, attachments=None, reply_to=None:
+                            (calls.append(to), "provider-id")[1])
 
     csv = "Name,Email Address,Mobile Number\n" + "".join(
         f"P{i},p{i}@example.com,90000000{i:02d}\n" for i in range(4)
@@ -143,6 +146,41 @@ def test_rate_limiting_throttles_sends(client, admin_headers, project, monkeypat
     assert len(calls) == 4
     # At 2/sec, 4 sends can't complete near-instantly -- proves throttling ran.
     assert elapsed >= 0.4
+
+
+def test_concurrent_completion_only_fires_once(client, admin_headers, project):
+    """Two workers that both finish the campaign's last message at the same
+    instant must not both trigger completion side effects. Old code did
+    read-then-write (both threads could read status=="sending" before
+    either commits its own write); the fix is a conditional
+    `UPDATE ... WHERE status='sending'`, so only whichever call's UPDATE
+    actually flips the row gets True back -- see worker._maybe_complete_campaign."""
+    c = make_campaign(client, admin_headers, project["id"])
+    db = SessionLocal()
+    try:
+        campaign = db.get(Campaign, c["id"])
+        campaign.status = "sending"
+        db.commit()
+    finally:
+        db.close()
+
+    def _attempt(_):
+        db = SessionLocal()
+        try:
+            return worker_mod._maybe_complete_campaign(db, c["id"])
+        finally:
+            db.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(_attempt, range(2)))
+
+    assert sorted(results) == [False, True]
+
+    db = SessionLocal()
+    try:
+        assert db.get(Campaign, c["id"]).status == "completed"
+    finally:
+        db.close()
 
 
 def test_redis_queue_uses_dedicated_test_db():

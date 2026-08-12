@@ -22,7 +22,12 @@ def overview(db: Session = Depends(get_db), user: User = Depends(get_current_use
         projects = sorted(user.projects, key=lambda p: p.id, reverse=True)
     pids = [p.id for p in projects]
 
-    campaigns = db.query(Campaign).filter(Campaign.project_id.in_(pids)).all() if pids else []
+    # Test campaigns carry only fabricated (Simulate-driven) engagement data --
+    # excluded here so it never inflates the real cross-campaign analytics
+    # shown on this dashboard (see routers/followups.py::simulate_event).
+    campaigns = (db.query(Campaign)
+                 .filter(Campaign.project_id.in_(pids), Campaign.is_test_campaign.is_(False)).all()
+                 if pids else [])
     cids = [c.id for c in campaigns]
 
     # recipients per campaign

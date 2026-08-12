@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth'
 import { apiError } from '../api'
 import { Field } from '../components/ui'
@@ -55,6 +55,9 @@ export default function Login() {
             <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••" required />
           </Field>
+          <div style={{ textAlign: 'right', marginTop: -8, marginBottom: 14 }}>
+            <Link to="/forgot-password" className="t-sub">Forgot password?</Link>
+          </div>
 
           <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }}
             disabled={busy}>

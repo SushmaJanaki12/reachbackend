@@ -102,7 +102,7 @@ def _graph_attachments(attachments: list[Attachment]) -> list[dict]:
 
 
 def send_email(to_email: str, subject: str, body: str, from_email: str | None = None, is_html: bool = False,
-                attachments: list[Attachment] | None = None) -> str:
+                attachments: list[Attachment] | None = None, reply_to: str | None = None) -> str:
     """Send a single email. Returns the Graph provider request id. Raises MailError on failure.
 
     `is_html`, if set, means `body` is already-rendered, pre-escaped HTML;
@@ -112,6 +112,11 @@ def send_email(to_email: str, subject: str, body: str, from_email: str | None = 
     `attachments`, if given, is a list of (filename, content_bytes, content_type)
     -- see GRAPH_MAX_ATTACHMENT_BYTES/GRAPH_MAX_TOTAL_ATTACHMENT_BYTES for the
     size limits enforced before attempting the send.
+
+    `reply_to`, if given, overrides where a reply lands -- used for real
+    inbound-reply capture (P1.3, app/reply_capture.py) to route replies to
+    the polled mailbox instead of wherever this campaign's From address
+    would otherwise land them.
     """
     if not settings.email_configured:
         raise MailError("Office 365 email is not configured")
@@ -127,6 +132,8 @@ def send_email(to_email: str, subject: str, body: str, from_email: str | None = 
         },
         "saveToSentItems": True,
     }
+    if reply_to:
+        message["message"]["replyTo"] = [{"emailAddress": {"address": reply_to}}]
     if attachments:
         message["message"]["attachments"] = _graph_attachments(attachments)
     req = urllib.request.Request(
@@ -202,7 +209,7 @@ def email_channel_configured(project) -> bool:
 
 
 def _send_via_admin_or_graph(db, to_email: str, subject: str, body: str, is_html: bool,
-                              attachments: list[Attachment] | None = None) -> str:
+                              attachments: list[Attachment] | None = None, reply_to: str | None = None) -> str:
     admin_cfg = _active_admin_smtp(db)
     if admin_cfg is not None:
         from .crypto import decrypt_secret
@@ -212,14 +219,23 @@ def _send_via_admin_or_graph(db, to_email: str, subject: str, body: str, is_html
             host=admin_cfg.smtp_host, port=admin_cfg.smtp_port,
             username=admin_cfg.username, password=decrypt_secret(admin_cfg.password),
             from_email=admin_cfg.from_email, from_name=admin_cfg.from_name,
-            reply_to=admin_cfg.reply_to, encryption=admin_cfg.encryption,
+            reply_to=reply_to or admin_cfg.reply_to, encryption=admin_cfg.encryption,
             is_html=is_html, attachments=attachments,
         )
-    return send_email(to_email, subject, body, is_html=is_html, attachments=attachments)
+    return send_email(to_email, subject, body, is_html=is_html, attachments=attachments, reply_to=reply_to)
+
+
+def send_system_email(db, to_email: str, subject: str, body: str, is_html: bool = False) -> str:
+    """Workspace-level (non-campaign) email -- password reset links (P1.7),
+    etc. There's no project to resolve a per-project SMTP override from
+    here, so this goes straight to the same admin-SMTP-then-Graph fallback
+    send_campaign_email uses below its project tier. Raises MailError if
+    neither is configured."""
+    return _send_via_admin_or_graph(db, to_email, subject, body, is_html)
 
 
 def send_campaign_email(project, to_email: str, subject: str, body: str, is_html: bool = False,
-                         attachments: list[Attachment] | None = None) -> str:
+                         attachments: list[Attachment] | None = None, reply_to: str | None = None) -> str:
     """Single entry point for campaign sends. Every campaign-sending call
     site must go through this instead of importing send_email directly, so
     the resolver tiers are actually honored, in order:
@@ -235,6 +251,12 @@ def send_campaign_email(project, to_email: str, subject: str, body: str, is_html
     handles the send -- see app.mailer.Attachment for the expected shape and
     app.storage for the upload-time size/type validation every attachment
     here should already have passed.
+
+    `reply_to`, if given, overrides whichever tier's own configured
+    reply-to address -- used for real inbound-reply capture (P1.3,
+    app/reply_capture.py) so a reply lands in the mailbox this app actually
+    polls instead of wherever the project/admin config would otherwise
+    route it.
     """
     db = _session_of(project)
     if project_smtp_ready(project):
@@ -246,11 +268,11 @@ def send_campaign_email(project, to_email: str, subject: str, body: str, is_html
                 host=project.smtp_host, port=project.smtp_port,
                 username=project.smtp_username, password=decrypt_secret(project.smtp_password),
                 from_email=project.smtp_from_email, from_name=project.smtp_from_name,
-                reply_to=project.smtp_reply_to, encryption=project.smtp_encryption,
+                reply_to=reply_to or project.smtp_reply_to, encryption=project.smtp_encryption,
                 is_html=is_html, attachments=attachments,
             )
         except SmtpMailError:
             if project.smtp_fallback_on_failure and (_active_admin_smtp(db) is not None or settings.email_configured):
-                return _send_via_admin_or_graph(db, to_email, subject, body, is_html, attachments)
+                return _send_via_admin_or_graph(db, to_email, subject, body, is_html, attachments, reply_to)
             raise
-    return _send_via_admin_or_graph(db, to_email, subject, body, is_html, attachments)
+    return _send_via_admin_or_graph(db, to_email, subject, body, is_html, attachments, reply_to)

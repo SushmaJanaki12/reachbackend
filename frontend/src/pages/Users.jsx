@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import Layout from '../components/Layout'
 import api, { apiError } from '../api'
-import { Icon, Modal, Field, StatusBadge, Toggle, Spinner, useToast } from '../components/ui'
+import { Icon, Modal, Field, StatusBadge, Toggle, Spinner, Pager, useToast } from '../components/ui'
 
 const SEED_EMAILS = new Set(['admin@reach.io', 'user@reach.io'])
+const PAGE_SIZE = 25
 
 export default function Users() {
   const toast = useToast()
@@ -11,10 +12,14 @@ export default function Users() {
   const [roles, setRoles] = useState([])
   const [projects, setProjects] = useState([])
   const [editing, setEditing] = useState(null)
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
 
-  const load = () => api.get('/users').then((r) => setUsers(r.data)).catch(() => setUsers([]))
+  const load = () => api.get('/users', { params: { page, page_size: PAGE_SIZE } })
+    .then((r) => { setUsers(r.data); setTotal(Number(r.headers['x-total-count']) || r.data.length) })
+    .catch(() => { setUsers([]); setTotal(0) })
+  useEffect(() => { load() }, [page])
   useEffect(() => {
-    load()
     api.get('/roles').then((r) => setRoles(r.data))
     api.get('/projects').then((r) => setProjects(r.data)).catch(() => {})
   }, [])
@@ -72,6 +77,7 @@ export default function Users() {
           </table>
         </div>
       )}
+      {users && users.length > 0 && <Pager page={page} pageSize={PAGE_SIZE} total={total} onPage={setPage} />}
 
       {editing && (
         <UserModal initial={editing} roles={roles} projects={projects}

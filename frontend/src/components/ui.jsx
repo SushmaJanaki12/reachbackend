@@ -25,6 +25,7 @@ export const Icon = {
   userplus: (p) => <svg {...I(p)}><circle cx="9" cy="8" r="3.2"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M18 8v6M21 11h-6"/></svg>,
   paperclip: (p) => <svg {...I(p)}><path d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>,
   sparkle: (p) => <svg {...I(p)}><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18"/><circle cx="12" cy="12" r="2.2"/></svg>,
+  repeat: (p) => <svg {...I(p)}><path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>,
 }
 
 /* ---------------- Toast ---------------- */
@@ -100,3 +101,24 @@ export function StatusBadge({ status }) {
 }
 
 export function Spinner() { return <div className="center"><div className="spinner" /></div> }
+
+/* ---------------- Pagination (P1.6) ----------------
+   Pairs with list endpoints that accept ?page=&page_size= and report the
+   true row count via the X-Total-Count response header (see
+   app/pagination.py) -- those endpoints return one page by default now,
+   not the full table, so any list page reading from one needs this to
+   reach rows past the first page. */
+export function Pager({ page, pageSize, total, onPage }) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  if (totalPages <= 1) return null
+  return (
+    <div className="flex between" style={{ padding: '14px 4px 4px', alignItems: 'center' }}>
+      <span className="t-sub">{total} total</span>
+      <div className="flex gap8" style={{ alignItems: 'center' }}>
+        <button className="btn btn-ghost btn-sm" disabled={page <= 1} onClick={() => onPage(page - 1)}>Prev</button>
+        <span className="t-sub">Page {page} of {totalPages}</span>
+        <button className="btn btn-ghost btn-sm" disabled={page >= totalPages} onClick={() => onPage(page + 1)}>Next</button>
+      </div>
+    </div>
+  )
+}

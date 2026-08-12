@@ -102,7 +102,7 @@ def test_uploaded_attachment_reaches_send_campaign_email_at_send_time(client, ad
 
     calls = []
 
-    def fake_send_campaign_email(project, to, subject, body, is_html=False, attachments=None):
+    def fake_send_campaign_email(project, to, subject, body, is_html=False, attachments=None, reply_to=None):
         calls.append(attachments)
         return "provider-id"
     monkeypatch.setattr(worker_mod, "send_campaign_email", fake_send_campaign_email)
@@ -133,7 +133,7 @@ def test_no_attachments_passes_none_not_empty_list(client, admin_headers, projec
 
     calls = []
 
-    def fake_send_campaign_email(project, to, subject, body, is_html=False, attachments=None):
+    def fake_send_campaign_email(project, to, subject, body, is_html=False, attachments=None, reply_to=None):
         calls.append(attachments)
         return "provider-id"
     monkeypatch.setattr(worker_mod, "send_campaign_email", fake_send_campaign_email)

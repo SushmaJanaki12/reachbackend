@@ -1,3 +1,4 @@
+import secrets
 from datetime import datetime
 
 from sqlalchemy import (
@@ -53,6 +54,20 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class PasswordResetToken(Base):
+    """Self-service forgot/reset-password flow (P1.7). A row is single-use --
+    `used_at` gets set at redemption and the row is never revived -- and
+    short-lived (see Settings.password_reset_token_ttl_minutes), unlike the
+    long-lived access token issued at login."""
+    __tablename__ = "password_reset_tokens"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class Project(Base):
     __tablename__ = "projects"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -104,6 +119,12 @@ class Project(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     campaigns: Mapped[list["Campaign"]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
+    # IANA timezone name used for follow-up send-time/weekend-skip math.
+    # There's no per-recipient timezone anywhere in the data model (not even
+    # in the CSV import), so this one project-level value stands in for
+    # "the recipient's local timezone" for every recipient in the project.
+    timezone: Mapped[str] = mapped_column(String(60), default="UTC")
+
 
 class SmtpSettings(Base):
     """Admin-level (workspace-default) SMTP configuration -- tier 3 in the
@@ -132,6 +153,39 @@ class SmtpSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class ReplyCaptureSettings(Base):
+    """Workspace-wide config for real inbound-reply capture (P1.3, see
+    app/reply_capture.py): one IMAP mailbox this app polls, shared across
+    every project/campaign regardless of which tier (project SMTP, admin
+    SMTP, or O365/Graph) actually sent the original message -- there's no
+    provider-agnostic inbound-parse webhook available, so polling one
+    mailbox is the only mechanism that covers all of them uniformly.
+
+    A single row is expected (id=1 in practice, not DB-enforced -- the
+    router always upserts/reads the first row, same "there's realistically
+    only one" shape as this being workspace-wide rather than per-project).
+    """
+    __tablename__ = "reply_capture_settings"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Base address replies are routed to, e.g. "replies@reach-tracking.com".
+    # Outbound campaign emails get Reply-To set to "local+{token}@domain" --
+    # the +token subaddress is how an inbound reply gets matched back to the
+    # Message it was a reply to (see app/reply_capture.py::reply_to_alias).
+    mailbox_address: Mapped[str] = mapped_column(String(200), default="")
+    imap_host: Mapped[str] = mapped_column(String(200), default="")
+    imap_port: Mapped[int] = mapped_column(default=993)
+    imap_use_ssl: Mapped[bool] = mapped_column(Boolean, default=True)
+    imap_username: Mapped[str] = mapped_column(String(200), default="")
+    imap_password: Mapped[str] = mapped_column(String(500), default="")  # encrypted at rest, see app/crypto.py
+    poll_folder: Mapped[str] = mapped_column(String(120), default="INBOX")
+    poll_interval_seconds: Mapped[int] = mapped_column(default=120)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_poll_status: Mapped[str] = mapped_column(String(20), default="never")  # ok|failed|never
+    last_poll_error: Mapped[str] = mapped_column(String(300), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class Campaign(Base):
     __tablename__ = "campaigns"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -145,17 +199,44 @@ class Campaign(Base):
     whatsapp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     sms_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Set only at creation (not exposed on CampaignUpdate) -- flipping it
+    # later would either unlock Simulate against a campaign that already has
+    # real recipients, or silently reclassify a test campaign's fabricated
+    # engagement data as real. Gates followups.simulate_event (see
+    # routers/followups.py) and excludes the campaign from dashboard rollups.
+    is_test_campaign: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Optional link to a registered DLT SMS template (for compliant SMS)
     sms_template_ref: Mapped[int | None] = mapped_column(ForeignKey("sms_templates.id"), nullable=True)
 
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
+    # Set when status flips to "sending" (send_campaign), left alone after --
+    # the stuck-campaign safeguard (GET /api/admin/queue-status) uses it as
+    # the floor for "how long has this campaign been sending" before any
+    # Message row exists yet to measure activity from instead.
+    sending_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Which "send" the live Message rows currently belong to (P0.5, revised
+    # 2026-08-11: resend is allowed repeatedly rather than blocked after the
+    # first send). Bumped by app/campaign_resend.py::archive_campaign_history
+    # each time a resend archives the prior run's Message/FollowUpRun rows
+    # into MessageHistory/FollowUpRunHistory and clears the live tables --
+    # every Message this campaign creates from then on (original blast and
+    # follow-up steps alike) is stamped with this value.
+    current_send_run: Mapped[int] = mapped_column(default=1)
+
     recipients: Mapped[list["Recipient"]] = relationship(back_populates="campaign", cascade="all, delete-orphan",
                                                           order_by="Recipient.id")
     contents: Mapped[list["CampaignContent"]] = relationship(back_populates="campaign", cascade="all, delete-orphan")
     messages: Mapped[list["Message"]] = relationship(back_populates="campaign", cascade="all, delete-orphan")
     attachments: Mapped[list["CampaignAttachment"]] = relationship(back_populates="campaign", cascade="all, delete-orphan")
+    followup_steps: Mapped[list["FollowUpStep"]] = relationship(
+        back_populates="campaign", cascade="all, delete-orphan", order_by="FollowUpStep.step_order")
+    followup_settings: Mapped["CampaignFollowUpSettings"] = relationship(
+        back_populates="campaign", uselist=False, cascade="all, delete-orphan")
+    followup_runs: Mapped[list["FollowUpRun"]] = relationship(back_populates="campaign", cascade="all, delete-orphan")
 
 
 class Recipient(Base):
@@ -379,3 +460,183 @@ class Message(Base):
     sent_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     delivered_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     read_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    # Unguessable per-message id for the tracking pixel / click-redirect URLs
+    # (app/routers/tracking_pixel.py) -- deliberately not the raw integer PK,
+    # which would let anyone increment through it and mark other recipients'
+    # messages "opened". Generated once at row creation, never reused.
+    tracking_token: Mapped[str] = mapped_column(String(48), unique=True, index=True,
+                                                 default=lambda: secrets.token_urlsafe(24))
+    # Which send this row belongs to -- see Campaign.current_send_run. Set at
+    # creation time (send_campaign for the original blast, advance_followup_run
+    # for a follow-up step's send) from the owning campaign's current value;
+    # never changed afterward. A resend archives every row sharing the old
+    # value into MessageHistory before the live table is cleared for the next one.
+    sent_run_number: Mapped[int] = mapped_column(default=1)
+    # Bumped on every column write (status, error, engagement fields, ...) --
+    # the stuck-campaign safeguard (GET /api/admin/queue-status) uses the
+    # most recent value across a campaign's messages as its "still making
+    # progress" signal, since there's no per-row send-attempt log to read
+    # activity from otherwise.
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # Follow-ups: NULL means this Message is the original campaign blast;
+    # otherwise it's the send for this particular FollowUpStep in the
+    # recipient's sequence (see app/followups.py).
+    step_id: Mapped[int | None] = mapped_column(ForeignKey("follow_up_steps.id", ondelete="SET NULL"),
+                                                  nullable=True, index=True)
+    # Engagement state -- populated either by real tracking capture (not yet
+    # built) or, for now, via the "simulate event" testing endpoint. Trigger
+    # evaluation in app/followups.py reads these directly.
+    opened_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    clicked_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    replied_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    reply_text: Mapped[str] = mapped_column(Text, default="")
+    reply_sentiment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # interested|not_interested|unclear -- see app/reply_classifier.py
+    engagement_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # 'simulated' when opened_at/clicked_at/replied_at were written by the
+    # Simulate testing endpoint (app/followups.py::record_engagement_event)
+    # rather than real capture; null otherwise. Follow-up step performance
+    # stats (routers/followups.py::_step_stats) exclude simulated rows so
+    # QA/demo activity on a test campaign never leaks into real metrics.
+
+
+class FollowUpStep(Base):
+    """One step in a campaign's automated follow-up sequence. Steps run in
+    `step_order`; each has its own trigger condition + delay (see
+    app/followups.py::advance_followup_run) rather than firing on a blind
+    timer."""
+    __tablename__ = "follow_up_steps"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), index=True)
+    campaign: Mapped[Campaign] = relationship(back_populates="followup_steps")
+    step_order: Mapped[int] = mapped_column()
+
+    trigger_type: Mapped[str] = mapped_column(String(20))  # no_reply|not_opened|not_clicked
+    delay_value: Mapped[int] = mapped_column()
+    delay_unit: Mapped[str] = mapped_column(String(10), default="days")  # hours|days
+    send_time: Mapped[str | None] = mapped_column(String(5), nullable=True)  # "HH:MM" local, falls back to
+    # CampaignFollowUpSettings.default_send_time when unset
+
+    primary_channel: Mapped[str] = mapped_column(String(20), default="email")
+    fallback_channel: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+    subject: Mapped[str] = mapped_column(String(300), default="")
+    body_template: Mapped[str] = mapped_column(Text, default="")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_followup_step_order", "campaign_id", "step_order", unique=True),
+    )
+
+
+class CampaignFollowUpSettings(Base):
+    """1:1 campaign-level knobs for the follow-up engine. No separate
+    "enabled" flag -- the engine is live whenever the campaign has at least
+    one FollowUpStep, mirroring the reference mockup (which has no such
+    toggle)."""
+    __tablename__ = "campaign_follow_up_settings"
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), primary_key=True)
+    campaign: Mapped[Campaign] = relationship(back_populates="followup_settings")
+
+    max_touches_per_week: Mapped[int] = mapped_column(default=3)
+    skip_weekends: Mapped[bool] = mapped_column(Boolean, default=True)
+    negative_reply_handling: Mapped[str] = mapped_column(String(20), default="tag_and_stop")  # stop_only|tag_and_stop
+    default_send_time: Mapped[str | None] = mapped_column(String(5), nullable=True)  # "HH:MM" local
+    # P0.5 (revised 2026-08-11): a resend archives the prior send's
+    # FollowUpRun rows rather than leaving them live -- this decides whether
+    # a fresh run then starts immediately for recipients who already had one
+    # (True) or stays off until manually restarted, e.g. via a new step edit
+    # (False, default -- the spec's stated "safest default" pending a
+    # separate product decision on restart semantics; see
+    # app/followups.py::maybe_start_run).
+    restart_on_resend: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class FollowUpRun(Base):
+    """Tracks one recipient's live position in a campaign's follow-up
+    sequence. Re-evaluated by app/followups.py::advance_followup_run both on
+    its scheduled RQ timer (`scheduled_job_id`) and immediately whenever an
+    engagement event lands on `last_message`, so an early-satisfied trigger
+    doesn't have to wait out a stale timer."""
+    __tablename__ = "follow_up_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), index=True)
+    campaign: Mapped[Campaign] = relationship(back_populates="followup_runs")
+    recipient_id: Mapped[int] = mapped_column(ForeignKey("recipients.id", ondelete="CASCADE"), index=True)
+
+    status: Mapped[str] = mapped_column(String(24), default="active")
+    # active|stopped_interested|stopped_not_interested|completed
+    next_step_order: Mapped[int | None] = mapped_column(nullable=True)
+    scheduled_job_id: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    last_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)
+    last_message: Mapped["Message"] = relationship(foreign_keys=[last_message_id])
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("ix_followup_run_recipient", "campaign_id", "recipient_id", unique=True),
+    )
+
+
+class MessageHistory(Base):
+    """Snapshot of a Message row as it stood right before a resend cleared it
+    from the live `messages` table (P0.5, revised 2026-08-11: resend now
+    archives-and-clears rather than being blocked -- see
+    app/campaign_resend.py::archive_campaign_history, called from
+    routers/campaigns.py::send_campaign). One row per archived Message,
+    tagged with the run it belonged to so Tracking & Reports and Follow-ups
+    Performance can be scoped to a specific past send instead of blending
+    runs together.
+
+    `recipient_id`/`step_id` are deliberately plain columns, not foreign
+    keys -- the Recipient or FollowUpStep a historical row pointed to may
+    since have been deleted (dataset re-import, step edit) without that
+    invalidating the archived snapshot, which already carries its own copy
+    of recipient_name/to_address/etc.
+    """
+    __tablename__ = "message_history"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), index=True)
+    sent_run_number: Mapped[int] = mapped_column(index=True)
+    recipient_id: Mapped[int] = mapped_column(index=True)
+    channel: Mapped[str] = mapped_column(String(20))
+    to_address: Mapped[str] = mapped_column(String(200), default="")
+    recipient_name: Mapped[str] = mapped_column(String(200), default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    provider_id: Mapped[str] = mapped_column(String(120), default="")
+    error: Mapped[str] = mapped_column(String(300), default="")
+    warnings: Mapped[str] = mapped_column(String(300), default="")
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    tracking_token: Mapped[str] = mapped_column(String(48), index=True)
+    step_id: Mapped[int | None] = mapped_column(nullable=True)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    clicked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reply_text: Mapped[str] = mapped_column(Text, default="")
+    reply_sentiment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    engagement_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    archived_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_message_history_campaign_run", "campaign_id", "sent_run_number"),
+    )
+
+
+class FollowUpRunHistory(Base):
+    """Snapshot of a FollowUpRun row archived alongside its MessageHistory
+    rows on resend (see MessageHistory above) -- keeps the resend from
+    silently discarding where each recipient's follow-up sequence had gotten
+    to. Not surfaced in any UI yet; exists so that data isn't simply lost."""
+    __tablename__ = "follow_up_run_history"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), index=True)
+    sent_run_number: Mapped[int] = mapped_column(index=True)
+    recipient_id: Mapped[int] = mapped_column(index=True)
+    status: Mapped[str] = mapped_column(String(24))
+    next_step_order: Mapped[int | None] = mapped_column(nullable=True)
+    archived_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

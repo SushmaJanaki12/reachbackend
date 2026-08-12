@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import User, Role, Project, Campaign, Template
+from ..pagination import Pagination, paginate
 from ..schemas import UserOut, UserCreate, UserUpdate
 from ..security import hash_password
 from ..deps import require
@@ -16,8 +17,10 @@ SEED_EMAILS = {"admin@reach.io", "user@reach.io"}
 
 
 @router.get("", response_model=list[UserOut])
-def list_users(db: Session = Depends(get_db), _: User = Depends(require("user.manage"))):
-    return db.query(User).order_by(User.id).all()
+def list_users(response: Response, pagination: Pagination = Depends(),
+               db: Session = Depends(get_db), _: User = Depends(require("user.manage"))):
+    query = db.query(User).order_by(User.id)
+    return paginate(query, pagination, response)
 
 
 @router.post("", response_model=UserOut)

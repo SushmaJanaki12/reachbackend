@@ -27,7 +27,8 @@ def _configure_real_providers(monkeypatch):
 
     email_calls, sms_calls = [], []
     monkeypatch.setattr(worker_mod, "send_campaign_email",
-                        lambda project, to, subject, body, is_html=False, attachments=None: (email_calls.append(to), "email-provider-id")[1])
+                        lambda project, to, subject, body, is_html=False, attachments=None, reply_to=None:
+                            (email_calls.append(to), "email-provider-id")[1])
     monkeypatch.setattr(worker_mod, "send_sms",
                         lambda to, body, template_id=None: (sms_calls.append(to), "sms-provider-id")[1])
     return email_calls, sms_calls

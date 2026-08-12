@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     # a stolen token is usable until it expires. Track a refresh-token flow or
     # httpOnly-cookie session as a separate follow-up to raise this safely.
     access_token_expire_minutes: int = 120
+    # Self-service forgot/reset-password flow (P1.7) -- deliberately much
+    # shorter than the session token above: a reset link only needs to
+    # survive the trip from inbox to browser, not a working session.
+    password_reset_token_ttl_minutes: int = 30
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # Publicly reachable base URL for this API. Uploaded logo/badge images are
@@ -17,6 +21,11 @@ class Settings(BaseSettings):
     # via Microsoft Graph -- so in any non-local environment this MUST be the
     # real public hostname (e.g. https://reach.acme.com), not localhost.
     public_base_url: str = "http://localhost:8000"
+    # Base URL of the Reach *frontend* (the React SPA) -- distinct from
+    # public_base_url above (this API's own host). Password-reset links
+    # (P1.7) point here, since the reset form is a frontend route the
+    # recipient's browser navigates to, not an API endpoint.
+    frontend_base_url: str = "http://localhost:5173"
 
     # Off by default: seeding a known admin@reach.io/Admin@123 account on every
     # startup is only for local dev/demo use. Never enable in production.
@@ -43,6 +52,16 @@ class Settings(BaseSettings):
     email_rate_per_second: float = 5.0
     sms_rate_per_second: float = 5.0
     send_max_retries: int = 3
+
+    # GET /api/admin/queue-status: how stale a worker's last RQ heartbeat can
+    # get before it's reported as "not responding" -- much shorter than RQ's
+    # own worker registration TTL (7 min default), which exists to eventually
+    # forget a dead worker, not to promptly detect one.
+    worker_heartbeat_stale_seconds: int = 90
+    # A "sending" campaign with no Message row touched in this many minutes
+    # (and past this age itself, for campaigns with no messages processed
+    # yet) is flagged as stuck rather than just slow.
+    stuck_campaign_minutes: int = 15
 
     # OpenAI: enhances dataset-validation column-mapping and fix suggestions.
     # Leave blank to use the deterministic heuristic (alias table + fuzzy

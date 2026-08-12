@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import Layout from '../components/Layout'
 import api, { apiError } from '../api'
 import { useAuth } from '../auth'
-import { Icon, Field, Modal, StatusBadge, Spinner, useToast } from '../components/ui'
+import { Icon, Field, Modal, StatusBadge, Toggle, Spinner, useToast } from '../components/ui'
 import { SMTP_PROVIDER_DEFAULTS, SMTP_PROVIDER_OPTIONS, smtpProviderPasswordHint } from '../smtpProviders'
 
 export default function Settings() {
@@ -20,6 +20,8 @@ export default function Settings() {
         <EmailPanel />
         <SmsPanel />
       </div>
+      {can('system.configure') && <QueueHealthPanel />}
+      {can('system.configure') && <ReplyCapturePanel />}
       {can('system.configure') && <AdminSmtpSettings />}
     </Layout>
   )
@@ -150,6 +152,213 @@ function SmsPanel() {
         </div>
       )}
     </div>
+  )
+}
+
+function QueueHealthPanel() {
+  const [status, setStatus] = useState(null)
+
+  const load = () => api.get('/admin/queue-status').then((r) => setStatus(r.data)).catch(() => setStatus(null))
+  // 15s: fast enough that killing the worker process shows up as "not
+  // responding" on the next poll rather than requiring a manual refresh.
+  useEffect(() => { load(); const interval = setInterval(load, 15000); return () => clearInterval(interval) }, [])
+
+  const healthy = status?.healthy
+  const stuck = status?.stuck_campaigns || []
+
+  return (
+    <div className="card card-pad" style={{ marginBottom: 20 }}>
+      <div className="flex between" style={{ marginBottom: 14 }}>
+        <div className="flex gap12">
+          <span className="ico" style={{ width: 44, height: 44, borderRadius: 11, background: 'var(--teal-soft)', color: 'var(--teal)', display: 'grid', placeItems: 'center' }}><Icon.chart width={20} /></span>
+          <div>
+            <div style={{ fontWeight: 750, fontSize: 16 }}>Send queue</div>
+            <div className="t-sub">Worker process health and campaign delivery pipeline</div>
+          </div>
+        </div>
+        {status == null ? <div className="spinner" /> :
+          <StatusBadge status={healthy ? 'active' : 'failed'} />}
+      </div>
+
+      {status == null ? <Spinner /> : (
+        <>
+          <ConnRow label="Worker" value={healthy ? 'Responding' : 'Not responding'} />
+          <ConnRow label="Workers registered" value={status.worker_count} />
+          <ConnRow label="Last heartbeat" value={status.last_heartbeat ? new Date(status.last_heartbeat).toLocaleString() : '—'} />
+          <ConnRow label="Queue depth" value={status.queue_depth} />
+          <ConnRow label="Oldest queued job"
+            value={status.oldest_job_age_seconds != null ? `${Math.round(status.oldest_job_age_seconds)}s` : '—'} />
+
+          {!healthy && (
+            <div className="empty" style={{ padding: '14px 10px', marginTop: 12, textAlign: 'left' }}>
+              <p className="muted">
+                No worker has checked in recently. Campaigns will queue but not send until
+                <code> python -m app.worker</code> is running again.
+              </p>
+            </div>
+          )}
+
+          {stuck.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <div className="t-strong" style={{ marginBottom: 8 }}>Stuck campaigns</div>
+              {stuck.map((s) => (
+                <div key={s.id} className="flex between" style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+                  <Link to={`/campaigns/${s.id}`}>{s.name}</Link>
+                  <span className="muted">no activity for {s.minutes_stuck}m</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+function intervalLabel(secs) {
+  if (!secs) return '—'
+  if (secs < 60) return `${secs}s`
+  const mins = Math.round(secs / 60)
+  return `${mins} minute${mins !== 1 ? 's' : ''}`
+}
+
+const BLANK_REPLY_CAPTURE = {
+  enabled: false, mailbox_address: '', imap_host: '', imap_port: 993, imap_use_ssl: true,
+  imap_username: '', imap_password: '', poll_folder: 'INBOX', poll_interval_seconds: 120,
+}
+
+function ReplyCapturePanel() {
+  const toast = useToast()
+  const [settings, setSettings] = useState(null)
+  const [editing, setEditing] = useState(null)
+  const [busy, setBusy] = useState('')
+
+  const load = () => api.get('/admin/reply-capture').then((r) => setSettings(r.data)).catch(() => setSettings(null))
+  useEffect(() => { load() }, [])
+
+  const testConnection = async () => {
+    setBusy('test')
+    try { await api.post('/admin/reply-capture/test-connection'); toast.ok('IMAP connection successful') }
+    catch (e) { toast.err(apiError(e, 'Connection failed')) } finally { setBusy('') }
+  }
+
+  const pollNow = async () => {
+    setBusy('poll')
+    try {
+      const { data } = await api.post('/admin/reply-capture/poll-now')
+      toast.ok(`Polled now — ${data.matched ?? 0} repl${data.matched === 1 ? 'y' : 'ies'} matched`)
+      load()
+    } catch (e) { toast.err(apiError(e, 'Poll failed')) } finally { setBusy('') }
+  }
+
+  return (
+    <div className="card card-pad" style={{ marginBottom: 20 }}>
+      <div className="flex between" style={{ marginBottom: 14 }}>
+        <div className="flex gap12">
+          <span className="ico" style={{ width: 44, height: 44, borderRadius: 11, background: 'var(--teal-soft)', color: 'var(--teal)', display: 'grid', placeItems: 'center' }}><Icon.mail width={20} /></span>
+          <div>
+            <div style={{ fontWeight: 750, fontSize: 16 }}>Reply capture</div>
+            <div className="t-sub">Inbound reply detection for real campaigns, via IMAP polling</div>
+          </div>
+        </div>
+        {settings == null ? <div className="spinner" /> : <StatusBadge status={settings.enabled ? 'active' : 'inactive'} />}
+      </div>
+
+      {settings == null ? <Spinner /> : (
+        <>
+          <ConnRow label="Mailbox" value={settings.mailbox_address} />
+          <ConnRow label="IMAP host" value={settings.imap_host ? `${settings.imap_host}:${settings.imap_port}` : ''} />
+          <ConnRow label="Checks for replies every" value={intervalLabel(settings.poll_interval_seconds)} />
+          <ConnRow label="Last poll" value={settings.last_polled_at
+            ? `${settings.last_poll_status === 'ok' ? 'Succeeded' : 'Failed'} · ${new Date(settings.last_polled_at).toLocaleString()}`
+            : 'Never'} />
+          {settings.last_poll_status === 'failed' && settings.last_poll_error && (
+            <p className="hint" style={{ color: 'var(--danger)' }}>⚠ {settings.last_poll_error}</p>
+          )}
+          {settings.enabled && (
+            <p className="hint mt8">
+              A real reply can take up to {intervalLabel(settings.poll_interval_seconds)} to be detected here.
+              A follow-up step's "No reply" delay shorter than that risks firing on top of a reply that just
+              hasn't been picked up yet — keep step delays comfortably longer than this interval, or shorten
+              it below if that matters for a campaign.
+            </p>
+          )}
+          <div className="flex gap8 mt16">
+            <button className="btn btn-ghost btn-sm" onClick={() => setEditing({ ...BLANK_REPLY_CAPTURE, ...settings, imap_password: '' })}>
+              <Icon.edit width={13} /> Edit
+            </button>
+            {settings.imap_host && (
+              <button className="btn btn-ghost btn-sm" onClick={testConnection} disabled={busy === 'test'}>
+                {busy === 'test' ? 'Testing…' : <><Icon.check width={14} /> Test connection</>}
+              </button>
+            )}
+            {settings.enabled && (
+              <button className="btn btn-ghost btn-sm" onClick={pollNow} disabled={busy === 'poll'}>
+                {busy === 'poll' ? 'Polling…' : 'Poll now'}
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {editing && (
+        <ReplyCaptureModal initial={editing} hasPassword={!!settings?.has_password} toast={toast}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); load(); toast.ok('Reply capture settings saved') }} />
+      )}
+    </div>
+  )
+}
+
+function ReplyCaptureModal({ initial, hasPassword, toast, onClose, onSaved }) {
+  const [f, setF] = useState(initial)
+  const [busy, setBusy] = useState(false)
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }))
+
+  const save = async () => {
+    setBusy(true)
+    const payload = { ...f }
+    if (!payload.imap_password) delete payload.imap_password
+    try {
+      await api.put('/admin/reply-capture', payload)
+      onSaved()
+    } catch (e) { toast.err(apiError(e)) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title="Reply capture settings" onClose={onClose}
+      footer={<>
+        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+        <button className="btn btn-primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+      </>}>
+      <Field label="Enabled">
+        <Toggle checked={!!f.enabled} onChange={(v) => set('enabled', v)} label={f.enabled ? 'Polling for replies' : 'Disabled'} />
+      </Field>
+      <Field label="Mailbox address"
+        hint="Outbound campaign emails get Reply-To set to a +token alias of this address, so a reply routes back here regardless of which SMTP sent the original message.">
+        <input className="input" value={f.mailbox_address} onChange={(e) => set('mailbox_address', e.target.value)} placeholder="replies@yourdomain.com" />
+      </Field>
+      <div className="row-2">
+        <Field label="IMAP host"><input className="input" value={f.imap_host} onChange={(e) => set('imap_host', e.target.value)} placeholder="imap.example.com" /></Field>
+        <Field label="IMAP port"><input className="input" type="number" value={f.imap_port} onChange={(e) => set('imap_port', Number(e.target.value))} /></Field>
+      </div>
+      <Field label="Use SSL">
+        <Toggle checked={!!f.imap_use_ssl} onChange={(v) => set('imap_use_ssl', v)} label={f.imap_use_ssl ? 'SSL' : 'Plain'} />
+      </Field>
+      <div className="row-2">
+        <Field label="Username"><input className="input" value={f.imap_username} onChange={(e) => set('imap_username', e.target.value)} /></Field>
+        <Field label="Password" hint={hasPassword ? 'Leave blank to keep the saved password' : ''}>
+          <input className="input" type="password" value={f.imap_password || ''} onChange={(e) => set('imap_password', e.target.value)}
+            placeholder={hasPassword ? '••••••••• (leave blank to keep)' : ''} />
+        </Field>
+      </div>
+      <div className="row-2">
+        <Field label="Folder"><input className="input" value={f.poll_folder} onChange={(e) => set('poll_folder', e.target.value)} /></Field>
+        <Field label="Poll interval (seconds)" hint="How often the worker checks the mailbox — shown above and referenced in the Follow-ups tab.">
+          <input className="input" type="number" min={30} value={f.poll_interval_seconds} onChange={(e) => set('poll_interval_seconds', Number(e.target.value))} />
+        </Field>
+      </div>
+    </Modal>
   )
 }
 

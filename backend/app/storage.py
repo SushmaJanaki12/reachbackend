@@ -101,6 +101,18 @@ def read_campaign_attachment(storage_path: str) -> bytes:
     return (UPLOAD_DIR / storage_path).read_bytes()
 
 
+def duplicate_campaign_attachment(storage_path: str) -> tuple[str, int]:
+    """Copies an existing attachment file under a new name, for campaign
+    duplication (POST /campaigns/{id}/duplicate). The clone must not share a
+    storage_path with its source -- deleting either campaign's attachment
+    would otherwise delete the file out from under the other. Returns
+    (new_storage_path, size_bytes)."""
+    data = (UPLOAD_DIR / storage_path).read_bytes()
+    new_path = f"{uuid.uuid4().hex}{Path(storage_path).suffix}"
+    (UPLOAD_DIR / new_path).write_bytes(data)
+    return new_path, len(data)
+
+
 def delete_campaign_attachment(storage_path: str) -> None:
     path = UPLOAD_DIR / storage_path
     if path.is_file():

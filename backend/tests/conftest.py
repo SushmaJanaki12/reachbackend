@@ -96,8 +96,9 @@ def upload_dataset(client, headers, campaign_id, csv):
                         json={"mode": "valid_only"})
 
 
-def make_campaign(client, headers, project_id, name="Camp"):
-    r = client.post("/api/campaigns", headers=headers, json={"project_id": project_id, "name": name})
+def make_campaign(client, headers, project_id, name="Camp", is_test_campaign=False):
+    r = client.post("/api/campaigns", headers=headers,
+                     json={"project_id": project_id, "name": name, "is_test_campaign": is_test_campaign})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -115,3 +116,24 @@ def drain_queue():
     # SimpleWorker executes jobs in-process (no fork), so test-time monkeypatches
     # on app.worker (settings, send_email/send_sms) are visible to the job.
     SimpleWorker([send_queue], connection=redis_conn).work(burst=True)
+
+
+def run_scheduled():
+    """Moves any due delayed jobs (scheduled via queue.enqueue_at -- e.g. a
+    follow-up step's trigger timer, see app/followups.py::_schedule) from
+    RQ's scheduled registry into the ready queue.
+
+    Real deployments run this continuously via the separate scheduler
+    thread (`Worker(...).work(with_scheduler=True)`, see app/worker.py).
+    drain_queue() alone won't process a delayed job -- it only burns through
+    what's already in the ready queue -- so tests exercising the timer path
+    call this first to fast-forward past a step's delay deterministically.
+    """
+    from rq.job import Job
+    from rq.registry import ScheduledJobRegistry
+    from app.worker import send_queue, redis_conn
+    registry = ScheduledJobRegistry(queue=send_queue)
+    for job_id in registry.get_jobs_to_schedule():
+        job = Job.fetch(job_id, connection=redis_conn)
+        send_queue.enqueue_job(job)
+        registry.remove(job_id)
