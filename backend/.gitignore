@@ -1,0 +1,25 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Env / secrets
+.env
+*.env.local
+
+# DB / logs
+*.sqlite3
+*.log
+/logs/
+
+# Uploaded signature/branding assets (served at /uploads, not source-controlled)
+/uploads/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
